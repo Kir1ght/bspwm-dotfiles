@@ -20,8 +20,8 @@ PACMAN_CORE = [
     "pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber", "alsa-utils",
     # brightness / power / night light
     "brightnessctl", "upower", "power-profiles-daemon", "redshift", "geoclue",
-    # network / bluetooth
-    "networkmanager", "network-manager-applet", "bluez", "bluez-utils",
+    # network / bluetooth / proxy
+    "networkmanager", "network-manager-applet", "bluez", "bluez-utils", "xray",
     # file manager / thumbnails
     "thunar", "thunar-archive-plugin", "gvfs", "gvfs-mtp", "tumbler",
     "ffmpegthumbnailer",
@@ -73,11 +73,11 @@ MULTILIB_PKGS = [
 
 AUR_CORE = [
     "greenclip", "light", "rofi-bluetooth-git", "throne-bin",
-    "ttf-symbola", "ttf-ms-fonts",
+    "ttf-symbola", "ttf-ms-fonts", "v2raya-bin", "upscayl-bin",
 ]
 
 AUR_APPS = ["vesktop-bin", "obsidian", "onlyoffice-bin"]
 
-AUR_EXTRA = ["arttime-git", "hyx", "ptpython", "upscayl-bin", "bluetuith"]
+AUR_EXTRA = ["arttime-git", "hyx", "ptpython", "bluetuith"]
 
 AUR_OPTIONAL = ["dracula-icons-git", "dracula-cursors-git", "ly"]

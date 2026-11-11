@@ -62,7 +62,7 @@ def main() -> int:
             flags.append("--with-whisper")
         if ask("Install optional desktop applications?", False):
             flags.append("--with-apps")
-        if ask("Install optional AUR tools/themes (upscayl, ly, Dracula)?", False):
+        if ask("Install optional AUR tools/themes (ly, Dracula)?", False):
             flags.append("--with-extra")
 
     cmd = ["bash", INSTALL, *flags]

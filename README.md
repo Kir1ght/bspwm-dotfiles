@@ -305,6 +305,9 @@ anime-wall -p gelbooru -t landscape --min-score 10
 - GTK-тема `Dynamic` — перекрашенная копия Dracula. Открытые окна подхватят
   цвета после перезапуска.
 - `ly` ставится только с `--with-extra`.
+- `v2raya-bin` (v2rayA) вместе с ядром `xray` и `upscayl-bin` (Upscayl)
+  ставятся по умолчанию. Сервис v2rayA включается отдельно:
+  `sudo systemctl enable --now v2raya`.
 - `anime-wall` использует только стандартную библиотеку Python; для
   ANSI-арта fastfetch нужен `python-pillow`.
 

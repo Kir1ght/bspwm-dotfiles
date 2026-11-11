@@ -43,7 +43,7 @@ Options:
   --no-update        Do not run "pacman -Syu" before installing packages
   --with-whisper     Download whisper.cpp models (small + large-v3-turbo)
   --with-apps        Install the optional desktop applications
-  --with-extra       Install optional AUR tools/themes (upscayl, ly, Dracula icons)
+  --with-extra       Install optional AUR tools/themes (ly, Dracula icons)
   --yes              Assume "yes" (currently only affects informational prompts)
   --dry-run          Print what would be done and exit
   -h, --help         Show this help
@@ -144,8 +144,8 @@ PACMAN_CORE=(
     pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils
     # brightness / power / night light
     brightnessctl upower power-profiles-daemon redshift geoclue
-    # network / bluetooth
-    networkmanager network-manager-applet bluez bluez-utils
+    # network / bluetooth / proxy
+    networkmanager network-manager-applet bluez bluez-utils xray
     # file manager / thumbnails
     thunar thunar-archive-plugin gvfs gvfs-mtp tumbler ffmpegthumbnailer
     # archives
@@ -191,6 +191,7 @@ MULTILIB_PKGS=(
 
 AUR_CORE=(
     greenclip light rofi-bluetooth-git throne-bin ttf-symbola ttf-ms-fonts
+    v2raya-bin upscayl-bin
 )
 
 AUR_APPS=(
@@ -198,7 +199,7 @@ AUR_APPS=(
 )
 
 AUR_EXTRA=(
-    arttime-git hyx ptpython upscayl-bin bluetuith
+    arttime-git hyx ptpython bluetuith
 )
 
 AUR_OPTIONAL=(
