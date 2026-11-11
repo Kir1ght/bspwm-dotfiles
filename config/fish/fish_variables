@@ -1,0 +1,7 @@
+# This file contains fish universal variable definitions.
+# VERSION: 3.0
+SETUVAR --export LIBVIRT_DEFAULT_URI:qemu\x3a///system
+SETUVAR SXHKD_SHELL:sh
+SETUVAR __fish_initialized:4300
+SETUVAR fish_greeting:\x1d
+SETUVAR fish_user_paths:@HOME@/\x2elocal/bin

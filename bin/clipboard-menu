@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# One menu at a time: repeated hotkey presses would stack rofi instances.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/clipboard-menu.lock"
+flock -n 9 || exit 0
+
+# Показывает историю буфера обмена (демон greenclip) через rofi.
+# При выборе записи rofi вызывает "greenclip print <выбранная строка>",
+# а greenclip сам копирует её обратно в системный буфер обмена.
+rofi -modi "clipboard:$HOME/.local/bin/greenclip print" -show clipboard

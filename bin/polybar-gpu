@@ -1,0 +1,58 @@
+#!/bin/sh
+# NVIDIA GPU load/temperature for polybar.
+# nvidia-smi prints driver/NVML errors to stdout, so validate the CSV
+# fields before showing anything. On failure the module stays empty
+# instead of dumping "Failed to initialize NVML..." into the bar.
+#
+# A failed probe is cached for five minutes. With a driver/library version
+# mismatch nvidia-smi fails on every call; without this cache the module
+# would poke NVML every 5 seconds and spam the kernel log.
+command -v nvidia-smi >/dev/null 2>&1 || exit 0
+
+# Reading runtime_status does not wake the GPU. If it is already suspended,
+# do not call nvidia-smi: NVML powers the GPU on, and a 5-second Polybar poll
+# would then keep the discrete card awake forever.
+STATUS=/sys/bus/pci/devices/0000:01:00.0/power/runtime_status
+if [ -r "$STATUS" ]; then
+    status=$(cat "$STATUS" 2>/dev/null || true)
+    if [ "$status" != "active" ]; then
+        printf '󰢮 off'
+        exit 0
+    fi
+fi
+
+# Xorg keeps the NVIDIA DRM node open even when the display is driven by the
+# AMD iGPU, but that is not a workload. Only ask NVML for statistics when a
+# real client has an NVIDIA device open; fuser reads /proc and does not wake
+# the card.
+if command -v fuser >/dev/null 2>&1 &&
+   ! timeout 1 fuser -s /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/dri/renderD128 2>/dev/null; then
+    printf '󰢮 idle'
+    exit 0
+fi
+
+FAIL=/tmp/polybar-gpu.fail
+now=$(date +%s)
+if [ -f "$FAIL" ]; then
+    last=$(cat "$FAIL" 2>/dev/null || echo 0)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -lt 300 ] && exit 0
+fi
+
+line=$(timeout 2 nvidia-smi --query-gpu=utilization.gpu,temperature.gpu \
+    --format=csv,noheader,nounits 2>/dev/null | head -n1 || true)
+[ -z "$line" ] && { date +%s > "$FAIL"; exit 0; }
+
+util=$(printf '%s' "$line" | cut -d, -f1 | tr -d ' ')
+temp=$(printf '%s' "$line" | cut -d, -f2 | tr -d ' ')
+
+# Driver 620 reports temperature as e.g. "41.60"; Polybar only needs whole
+# degrees. Strip the fractional part before validating the field.
+util=${util%%.*}
+temp=${temp%%.*}
+
+case "$util" in ''|*[!0-9]*) date +%s > "$FAIL"; exit 0 ;; esac
+case "$temp" in ''|*[!0-9]*) date +%s > "$FAIL"; exit 0 ;; esac
+
+rm -f "$FAIL"
+printf '󰢮 %s%% %s°C' "$util" "$temp"

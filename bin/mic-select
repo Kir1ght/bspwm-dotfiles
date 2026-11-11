@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# One selector at a time (see audio-select).
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/mic-select.lock"
+flock -n 9 || exit 0
+
+CURRENT_SOURCE=$(pactl get-default-source)
+
+MAP=$(pactl list sources | awk '
+    /^Source #[0-9]+/ { id=$2; sub("#", "", id) }
+    /node.name =/ { name=$3; gsub(/"/, "", name) }
+    /device.description =/ {
+        desc=$0;
+        sub(/^[ \t]*device.description = "/, "", desc);
+        sub(/"$/, "", desc);
+
+        # Filter: strictly keep physical inputs, skip output monitor loops
+        if ((name ~ /^alsa_input\./ || name ~ /^bluez_input\./) && name !~ /\.monitor$/) {
+            if (name ~ /^bluez/) {
+                clean_name = "🎧 Bluetooth: " desc
+            } else if (name ~ /Synaptics/ || desc ~ /CX31993/) {
+                clean_name = "🎙️ External DAC / Headset Mic"
+            } else if (name ~ /pci-0000/) {
+                clean_name = "💻 Built-in Laptop Microphone"
+            } else {
+                clean_name = "🎙️ " desc
+            }
+            print clean_name " | " name
+        }
+    }
+')
+
+if [ -z "$MAP" ]; then
+    notify-send -a "Audio" "Error" "No input devices found" -t 2000
+    exit 1
+fi
+
+DESCRIPTIONS=$(echo "$MAP" | awk -F ' \\| ' '{print $1}')
+
+DEFAULT_INDEX=$(echo "$MAP" | awk -F ' \\| ' -v cur="$CURRENT_SOURCE" '$2 == cur {print NR-1}')
+[ -z "$DEFAULT_INDEX" ] && DEFAULT_INDEX=0
+
+SELECTED_DESC=$(echo "$DESCRIPTIONS" | rofi -dmenu -i -selected-row "$DEFAULT_INDEX" -p "Microphone" -theme-str 'window {width: 450px;}')
+
+if [ -n "$SELECTED_DESC" ]; then
+    SOURCE_NAME=$(echo "$MAP" | awk -F ' \\| ' -v desc="$SELECTED_DESC" '$1 == desc {print $2; exit}')
+
+    pactl set-default-source "$SOURCE_NAME"
+
+    pactl list short source-outputs | while read -r stream _; do
+        pactl move-source-output "$stream" "$SOURCE_NAME" 2>/dev/null
+    done
+
+    notify-send -a "Audio" -i microphone-sensitivity-high "Input Changed" "$SELECTED_DESC" -t 2000
+fi

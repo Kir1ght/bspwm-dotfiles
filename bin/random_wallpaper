@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+
+# Pick a random wallpaper, apply an explicit one, or manage the lock screen
+# wallpaper. The palette is rebuilt from the applied desktop wallpaper.
+#
+# Wallpapers live in two libraries and nothing else is scanned:
+#   ~/Images/Wallpaper_desktop
+#   ~/Images/Wallpaper_lockscreen
+#
+# Any file passed with --set that lives outside the matching library is
+# imported into it (atomic copy, same-content files are reused, name clashes
+# get a -2, -3 … suffix). Files from ~/Downloads and temporary directories are
+# moved instead of copied, so an applied download is not left behind twice.
+# No per-image lists live outside the cache: after the import the normal folder
+# scan finds the file.
+#
+# Full-size 4K/6K images are slow for feh, so every wallpaper is rendered once
+# into a screen-sized JPEG cache (~40 ms per switch instead of ~150 ms). The
+# list of source wallpapers is kept in ~/.cache/theme/wallpapers.list so a
+# key-repeat press does not walk the library.
+#
+# Concurrency: exactly one worker may own wallpaper.lock. Every other desktop
+# invocation only publishes its choice to wallpaper.pending and exits, so a
+# burst of keypresses is coalesced to the newest wallpaper. Lock screen changes
+# are just an atomic symlink swap and never touch the desktop worker.
+#
+# Palette generation is deliberately decoupled from browsing. While presses
+# keep arriving, the worker only runs `feh` (~40 ms per image): the theme,
+# Polybar and dunst are NOT rebuilt for every wallpaper you skip past. Once no
+# press arrives for WALLPAPER_SETTLE_MS, the worker starts one detached apply.py
+# for the wallpaper you stopped on and releases the lock. The rebuild aborts
+# by itself if ~/.fehbg moves to another image, so the next press is always
+# instant even while GTK/Polybar are being recolored.
+#
+#   random_wallpaper                    pick a random desktop wallpaper
+#   random_wallpaper --set PATH         apply an explicit desktop wallpaper
+#   random_wallpaper --cache-all        (re)build the desktop cache list
+#   random_wallpaper --lockscreen       pick a random lock screen wallpaper
+#   random_wallpaper --set PATH --lockscreen
+#                                       set the lock screen wallpaper
+
+set -euo pipefail
+
+IMAGES_ROOT="$HOME/Images"
+DESKTOP_DIR="$IMAGES_ROOT/Wallpaper_desktop"
+LOCKSCREEN_DIR="$IMAGES_ROOT/Wallpaper_lockscreen"
+DESKTOP_LINK="$HOME/.current_wallpaper"
+LOCKSCREEN_LINK="$HOME/.current_lockscreen"
+
+CACHE_DIR="$HOME/.cache/theme"
+WALL_CACHE_DIR="$CACHE_DIR/wallpapers"
+LIST="$CACHE_DIR/wallpapers.list"
+SCREEN_FILE="$CACHE_DIR/screen"
+PENDING="$CACHE_DIR/wallpaper.pending"
+LOCK="$CACHE_DIR/wallpaper.lock"
+IMPORT_LOCK="$CACHE_DIR/wallpaper-import.lock"
+# How long the wallpaper must stay unchanged before the palette is rebuilt.
+# Only image switches are allowed during this window, so browsing stays fast.
+SETTLE_MS="${WALLPAPER_SETTLE_MS:-1500}"
+mkdir -p "$WALL_CACHE_DIR" "$DESKTOP_DIR" "$LOCKSCREEN_DIR"
+
+MODE="desktop"
+ACTION=""
+EXPLICIT=""
+
+usage() {
+    cat <<EOF
+usage: ${0##*/} [--lockscreen] [--set PATH | --cache-all]
+EOF
+}
+
+# Optional tracing for race debugging: RW_DEBUG=/tmp/rw.log random_wallpaper
+dbg() {
+    [ -n "${RW_DEBUG:-}" ] || return 0
+    printf '%s [%s] %s\n' "$(date +%H:%M:%S.%3N)" "$$" "$*" >>"$RW_DEBUG"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --lockscreen|--lock)
+            MODE="lockscreen"
+            shift
+            ;;
+        --desktop)
+            MODE="desktop"
+            shift
+            ;;
+        --set)
+            [ "$#" -ge 2 ] || { echo "usage: ${0##*/} --set PATH" >&2; exit 2; }
+            ACTION="set"
+            EXPLICIT="$2"
+            shift 2
+            ;;
+        --cache-all)
+            ACTION="cache"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+find_wallpapers() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+    find "$dir" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        -print0
+}
+
+cache_wallpaper() {
+    local src="$1" width="$2" height="$3"
+    local key name cache tmp
+    key=$(printf '%s' "$src" | sha1sum | cut -c1-16)
+    name=$(basename "$src")
+    cache="$WALL_CACHE_DIR/${name%.*}-${key}-${width}x${height}.jpg"
+    if [ ! -f "$cache" ] || [ "$src" -nt "$cache" ]; then
+        tmp="$cache.$$.jpg"
+        rm -f "$tmp"
+        if command -v vipsthumbnail >/dev/null 2>&1 &&
+           vipsthumbnail "$src" -s "${width}x${height}" -m centre -o "$tmp" >/dev/null 2>&1; then
+            mv "$tmp" "$cache"
+        else
+            rm -f "$tmp"
+            cache="$src"
+        fi
+    fi
+    printf '%s\n' "$cache"
+}
+
+# True when the list still describes the current desktop library: every entry
+# must live in Wallpaper_desktop and exist. This also rejects the old format,
+# which stored cache paths, so an upgrade rebuilds the list automatically.
+list_is_current() {
+    [ -s "$LIST" ] || return 1
+    local src
+    while IFS= read -r src; do
+        case "$src" in
+            "$DESKTOP_DIR"/*) [ -f "$src" ] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done < "$LIST"
+    return 0
+}
+
+build_list() {
+    local src tmp_list
+    tmp_list="$LIST.$$"
+    : > "$tmp_list"
+    while IFS= read -r -d '' src; do
+        [ -n "$src" ] || continue
+        # Keep source paths in the manifest. The rendered cache is derived
+        # from them on apply, so a moved/removed source can be detected and
+        # the manifest never becomes a second wallpaper database.
+        printf '%s\n' "$src" >> "$tmp_list"
+    done < <(find_wallpapers "$DESKTOP_DIR")
+    sort -u "$tmp_list" -o "$tmp_list"
+    mv "$tmp_list" "$LIST"
+}
+
+screen_geometry() {
+    if [ -s "$SCREEN_FILE" ]; then
+        read -r SCREEN < "$SCREEN_FILE"
+    else
+        SCREEN=$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; found=1} END {if (!found) exit 1}' || true)
+        [ -n "$SCREEN" ] || SCREEN=2560x1600
+        printf '%s\n' "$SCREEN" > "$SCREEN_FILE"
+    fi
+    SCREEN_W=${SCREEN%x*}
+    SCREEN_H=${SCREEN#*x}
+}
+
+# Import a file into the library. Returns the path inside the library.
+import_wallpaper() {
+    local src="$1" dir="$2"
+    local real base target counter tmp duplicate=0
+    [ -f "$src" ] || { echo "no such wallpaper: $src" >&2; return 1; }
+    mkdir -p "$dir"
+
+    # Anime Wall, the picker, and a direct CLI call may import at the same
+    # time. Serialize only the library-copy section so two callers cannot
+    # choose the same collision suffix.
+    exec 8>"$IMPORT_LOCK"
+    flock -x 8
+    real=$(realpath -e -- "$src" 2>/dev/null || printf '%s' "$src")
+
+    # Already in the library (possibly reached through a symlink): nothing to do.
+    case "$real" in
+        "$dir"/*)
+            exec 8>&-
+            printf '%s\n' "$real"
+            return 0
+            ;;
+    esac
+
+    base=$(basename -- "$real")
+    target="$dir/$base"
+    counter=2
+    while [ -e "$target" ]; do
+        if [ -f "$target" ] && cmp -s -- "$real" "$target"; then
+            duplicate=1
+            break
+        fi
+        target="$dir/${base%.*}-${counter}.${base##*.}"
+        counter=$((counter + 1))
+    done
+
+    if [ "$duplicate" = 0 ]; then
+        tmp=$(mktemp "$dir/.import.XXXXXX")
+        if ! cp -p -- "$real" "$tmp"; then
+            rm -f -- "$tmp"
+            exec 8>&-
+            return 1
+        fi
+        mv -f -- "$tmp" "$target"
+    fi
+
+    # Downloads and temporary files are one-shot: after import they belong to
+    # the library. Everything else (e.g. the Anime Wall vault) is copied.
+    case "$real" in
+        "$HOME/Downloads"/*|/tmp/*|"${TMPDIR:-/tmp}"/*)
+            rm -f -- "$real"
+            ;;
+    esac
+
+    exec 8>&-
+    printf '%s\n' "$target"
+}
+
+update_symlink() {
+    local target="$1" link="$2" tmp
+    tmp="${link}.$$"
+    ln -sfn -- "$target" "$tmp"
+    mv -Tf -- "$tmp" "$link"
+}
+
+write_fehbg() {
+    local tmp="$HOME/.fehbg.$$"
+    # Keep ~/.fehbg a self-contained executable script: bspwm runs it from
+    # bspwmrc on every login. Earlier versions wrote it without the execute
+    # bit, so the wallpaper was not restored after a reboot.
+    printf '#!/bin/sh\nfeh --no-fehbg --bg-fill "%s"\n' "$1" > "$tmp"
+    chmod 755 "$tmp"
+    mv "$tmp" "$HOME/.fehbg"
+}
+
+apply_desktop() {
+    local source="$1" cache
+    cache=$(cache_wallpaper "$source" "$SCREEN_W" "$SCREEN_H")
+    feh --no-fehbg --bg-fill "$cache" 9>&-
+    write_fehbg "$cache"
+    update_symlink "$source" "$DESKTOP_LINK"
+}
+
+apply_lockscreen() {
+    local source="$1"
+    update_symlink "$source" "$LOCKSCREEN_LINK"
+}
+
+publish_wallpaper() {
+    local tmp="$PENDING.$$"
+    printf '%s\n' "$1" > "$tmp"
+    mv "$tmp" "$PENDING"
+}
+
+take_pending() {
+    [ -f "$PENDING" ] || return 1
+    local consumed="$PENDING.$$"
+    mv "$PENDING" "$consumed" 2>/dev/null || return 1
+    PENDING_WALL=$(cat "$consumed" 2>/dev/null || true)
+    rm -f "$consumed"
+    [ -n "${PENDING_WALL:-}" ]
+}
+
+pick_wall() {
+    local candidate
+    candidate="${walls[RANDOM % ${#walls[@]}]}"
+    if [ ! -f "$candidate" ]; then
+        # The library changed behind our back: rebuild the list once.
+        build_list
+        mapfile -t walls < "$LIST"
+        [ "${#walls[@]}" -gt 0 ] || return 1
+        candidate="${walls[RANDOM % ${#walls[@]}]}"
+    fi
+    printf '%s\n' "$candidate"
+}
+
+# ---------------------------------------------------------------------------
+# Lock screen: one atomic symlink, no palette and no desktop worker involved.
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "lockscreen" ]; then
+    lock_wall=""
+    if [ "$ACTION" = "set" ]; then
+        lock_wall=$(import_wallpaper "$EXPLICIT" "$LOCKSCREEN_DIR")
+    elif [ "$ACTION" = "cache" ]; then
+        echo "nothing to cache for the lock screen" >&2
+        exit 0
+    else
+        mapfile -d '' -t lock_walls < <(find_wallpapers "$LOCKSCREEN_DIR")
+        [ "${#lock_walls[@]}" -gt 0 ] || {
+            echo "no lock screen wallpapers in $LOCKSCREEN_DIR" >&2
+            exit 1
+        }
+        lock_wall="${lock_walls[RANDOM % ${#lock_walls[@]}]}"
+    fi
+    apply_lockscreen "$lock_wall"
+    dbg "lockscreen -> $lock_wall"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Desktop: explicit apply, cache rebuild, or a coalesced random worker.
+# ---------------------------------------------------------------------------
+case "$ACTION" in
+    cache)
+        screen_geometry
+        build_list
+        exit 0
+        ;;
+    set)
+        screen_geometry
+        wall=$(import_wallpaper "$EXPLICIT" "$DESKTOP_DIR")
+        # A new import must be visible to the next random pick immediately.
+        rm -f "$LIST"
+        ;;
+    "")
+        screen_geometry
+        if ! list_is_current || [ "$DESKTOP_DIR" -nt "$LIST" ]; then
+            build_list
+        fi
+        if [ -s "$LIST" ]; then
+            mapfile -t walls < "$LIST"
+        else
+            mapfile -d '' -t walls < <(find_wallpapers "$DESKTOP_DIR")
+        fi
+        [ "${#walls[@]}" -gt 0 ] || exit 0
+        wall=$(pick_wall) || exit 0
+        ;;
+esac
+
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    # A worker is already cycling wallpapers. Leave it only the newest choice.
+    dbg "publish $wall (worker busy)"
+    publish_wallpaper "$wall"
+    exit 0
+fi
+
+dbg "worker acquired lock, start=$wall"
+# We own the worker. A newer press may have arrived while taking the lock.
+current="$wall"
+if take_pending; then
+    current="$PENDING_WALL"
+    dbg "dropped own pick for newer pending $current"
+fi
+
+while :; do
+    apply_desktop "$current"
+    dbg "applied $current"
+
+    # Browse mode: keep consuming presses and only switch the image. The
+    # palette is not touched until the user stops for SETTLE_MS, so skipping
+    # past ten wallpapers costs ten feh calls instead of ten GTK recolors,
+    # Polybar restarts and dunst reloads.
+    settled=0
+    deadline_ms=$(( $(date +%s%3N) + SETTLE_MS ))
+    while :; do
+        if take_pending; then
+            current="$PENDING_WALL"
+            dbg "pending -> $current"
+            break
+        fi
+        if [ "$(date +%s%3N)" -ge "$deadline_ms" ]; then
+            settled=1
+            break
+        fi
+        sleep 0.05
+    done
+    [ "$settled" = 1 ] || continue
+    dbg "settled on $current"
+
+    # The user stopped on this wallpaper. Release the worker lock before the
+    # expensive rebuild: the detached apply.py may take seconds in GTK/Polybar,
+    # and the next keypress must still switch the image immediately.
+    flock -u 9
+
+    # Close the lost-wakeup window: a press that arrived just before the
+    # unlock must either be taken here or by whoever took the lock from us.
+    if [ -f "$PENDING" ]; then
+        if flock -n 9; then
+            if take_pending; then
+                current="$PENDING_WALL"
+                dbg "late pending -> $current"
+                continue
+            fi
+        else
+            dbg "late pending owned by another worker; exit"
+            exit 0
+        fi
+    fi
+
+    # One palette rebuild for the wallpaper the user settled on. No debounce
+    # here: the settle window above already coalesced the burst. The child must
+    # not inherit fd 9, or it would keep the worker lock for its whole run.
+    setsid "$HOME/.config/theme/apply.py" --quiet --debounce 0 9>&- \
+        >/dev/null 2>&1 &
+    dbg "spawned apply.py for $current; exit"
+    exit 0
+done

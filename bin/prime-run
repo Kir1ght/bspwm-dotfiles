@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Keep the NVIDIA dGPU awake for the whole prime-run session, even if the
+# application is temporarily idle. After this process exits the fd is closed
+# and runtime PM may suspend the GPU again.
+exec 9<>/dev/nvidia0 2>/dev/null || true
+exec /usr/sbin/prime-run "$@"

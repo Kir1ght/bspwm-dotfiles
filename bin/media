@@ -1,0 +1,16 @@
+#!/bin/sh
+# Media-key action: playerctl (MPRIS) with mpd/mpc fallback.
+action="$1"
+
+if command -v playerctl >/dev/null 2>&1 && playerctl status >/dev/null 2>&1; then
+    playerctl "$action" 2>/dev/null && exit 0
+fi
+
+if command -v mpc >/dev/null 2>&1; then
+    case "$action" in
+        play-pause) mpc toggle ;;
+        next)       mpc next   ;;
+        previous)   mpc prev   ;;
+        stop)       mpc stop   ;;
+    esac
+fi

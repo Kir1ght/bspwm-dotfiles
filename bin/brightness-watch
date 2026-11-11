@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Stream the backlight percentage to Polybar's [module/backlight].
+#
+# Event-driven: the kernel emits a udev "change" event on every write to the
+# backlight attribute (measured: the event arrives 2-13 ms after the write), so
+# this process blocks in read() instead of polling every 250 ms.
+#
+# Polybar's `custom/script` + `tail = true` keeps it alive and shows every line
+# immediately, and the label reacts to *any* brightness change (Polybar click,
+# hardware key, other scripts). Prints exactly one line per change: on failure
+# of the sysfs read it leaves with an empty line so the bar never keeps a
+# phantom value.
+
+set -uo pipefail
+
+for dev in /sys/class/backlight/*; do
+    if [ -r "$dev/brightness" ]; then
+        DIR=$dev
+        break
+    fi
+done
+[ -n "${DIR:-}" ] || exit 0
+
+last=
+
+emit() {
+    local cur max
+    if ! cur=$(cat "$DIR/brightness" 2>/dev/null) ||
+        ! max=$(cat "$DIR/max_brightness" 2>/dev/null) ||
+        [ "${max:-0}" -le 0 ]; then
+        # Device vanished: clear the label instead of freezing the old number.
+        printf '\n'
+        exit 0
+    fi
+
+    local pct=$(((cur * 100 + max / 2) / max))
+    [ "$pct" = "$last" ] && return 0
+    last=$pct
+    printf '%s%%\n' "$pct"
+}
+
+emit
+
+# udevadm stays a child of this script; kill it when Polybar stops the module,
+# otherwise it would linger and hold the pipe open. PIPE matters too: if the bar
+# goes away, the next write raises SIGPIPE and the default handler would skip
+# the EXIT trap, leaving udevadm orphaned.
+#
+# A process substitution does NOT set $! to udevadm (that was the old bug: one
+# orphaned `udevadm monitor` accumulated on every Polybar restart). A coproc
+# whose subshell execs udevadm yields the real PID in $UDEV_PID.
+coproc UDEV { exec udevadm monitor --udev --subsystem-match=backlight --property 2>/dev/null; }
+monitor=$UDEV_PID
+trap 'kill "$monitor" 2>/dev/null; exit 0' EXIT TERM INT PIPE HUP
+
+# Every event is a block of KEY=VALUE lines terminated by an empty line.
+while IFS= read -r line <&"${UDEV[0]}"; do
+    [ -z "$line" ] && emit
+done

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pending official-repo updates for polybar. Prints nothing when up to date.
+command -v checkupdates >/dev/null 2>&1 || exit 0
+n=$(timeout 20 checkupdates 2>/dev/null | wc -l)
+# Exit 0 even when there is nothing to show: Polybar hides a custom/script
+# module only for empty output with a zero exit status.
+if [ "$n" -gt 0 ]; then
+    printf '󰚰 %s' "$n"
+fi
+exit 0

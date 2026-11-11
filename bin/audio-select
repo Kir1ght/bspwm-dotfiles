@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+
+# One selector at a time: two rofi instances fight over the keyboard grab and
+# the second pactl switch can undo the first.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/audio-select.lock"
+flock -n 9 || exit 0
+
+CURRENT_SINK=$(pactl get-default-sink)
+
+# Retrieve all sinks robustly (works for ALSA, USB, and BlueZ/Bluetooth)
+MAP=$(pactl list sinks | awk '
+    /^Sink #[0-9]+/ {
+        if (sink_name != "" && desc != "") {
+            print format_entry(desc, sink_name)
+        }
+        sink_name = ""
+        desc = ""
+    }
+    /^[ \t]*Name: / {
+        sink_name = $2
+    }
+    /^[ \t]*device.description = / {
+        d = $0
+        sub(/^[ \t]*device.description = "/, "", d)
+        sub(/"$/, "", d)
+        desc = d
+    }
+    /^[ \t]*Description: / && desc == "" {
+        d = $0
+        sub(/^[ \t]*Description: /, "", d)
+        desc = d
+    }
+    function format_entry(d, n) {
+        if (n ~ /^bluez_output/) {
+            label = "🎧 Bluetooth: " d
+        } else if (n ~ /Synaptics|CX31993/) {
+            label = "🔌 External DAC / Headphones"
+        } else if (n ~ /pci-0000/) {
+            label = "💻 Laptop Speakers"
+        } else {
+            label = "🔊 " d
+        }
+        return label " | " n
+    }
+    END {
+        if (sink_name != "" && desc != "") {
+            print format_entry(desc, sink_name)
+        }
+    }
+')
+
+if [ -z "$MAP" ]; then
+    notify-send -a "Audio" "Error" "No audio outputs found" -t 2000
+    exit 1
+fi
+
+DESCRIPTIONS=$(echo "$MAP" | awk -F ' \\| ' '{print $1}')
+
+# Find index of currently active sink for rofi pre-selection
+DEFAULT_INDEX=$(echo "$MAP" | awk -F ' \\| ' -v cur="$CURRENT_SINK" '$2 == cur {print NR-1}')
+[ -z "$DEFAULT_INDEX" ] && DEFAULT_INDEX=0
+
+SELECTED_DESC=$(echo "$DESCRIPTIONS" | rofi -dmenu -i -selected-row "$DEFAULT_INDEX" -p "Audio Output" -theme-str 'window {width: 450px;}')
+
+if [ -n "$SELECTED_DESC" ]; then
+    SINK_NAME=$(echo "$MAP" | awk -F ' \\| ' -v desc="$SELECTED_DESC" '$1 == desc {print $2; exit}')
+
+    if [ -n "$SINK_NAME" ]; then
+        # 1. Switch default system sink
+        pactl set-default-sink "$SINK_NAME"
+
+        # 2. Reroute actively playing streams (browser, players)
+        pactl list short sink-inputs | while read -r stream _; do
+            pactl move-sink-input "$stream" "$SINK_NAME" 2>/dev/null
+        done
+
+        # 3. Soft volume toggle to ensure Polybar catches the event immediately
+        pactl set-sink-volume @DEFAULT_SINK@ +1% 2>/dev/null && pactl set-sink-volume @DEFAULT_SINK@ -1% 2>/dev/null
+
+        notify-send -a "Audio" -i audio-speakers "Output Changed" "$SELECTED_DESC" -t 2000
+    fi
+fi

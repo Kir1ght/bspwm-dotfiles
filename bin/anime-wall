@@ -1,0 +1,2540 @@
+#!/usr/bin/env python3
+"""anime-wall — anime art browser for bspwm.
+
+Search Yande.re, Konachan, Danbooru and Gelbooru from rofi, preview the
+results as a thumbnail grid, then save the picture you like or apply it as
+the wallpaper through random_wallpaper (which also rebuilds the palette).
+
+The downloader is deliberately self contained: only the Python standard
+library is used for HTTP, so the package list does not grow. Preview images
+are cached in ~/.cache/anime-wall, full images go to
+~/Pictures/kiri-vault/<Provider>/ by default.
+
+Usage:
+    anime-wall                          open the rofi browser
+    anime-wall --print                  print the results as JSON
+    anime-wall --download 5             download the first five results
+    anime-wall -p konachan -t landscape print Konachan results
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import concurrent.futures
+import fcntl
+import filecmp
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a")
+
+# Keep every network operation short and bounded. A dead booru must never make
+# the rofi menu feel like it froze.
+API_TIMEOUT = 7
+PREVIEW_TIMEOUT = 3
+PREVIEW_BUDGET = 2.5
+DOWNLOAD_TIMEOUT = 120
+API_CACHE_TTL = 300
+PREVIEW_CACHE_TTL = 60 * 60 * 24 * 30
+
+RATING_CHOICES = ("safe", "questionable", "explicit", "all")
+ORIENTATION_CHOICES = ("any", "landscape", "portrait", "square")
+SORT_CHOICES = ("score", "new", "random")
+ON_ENTER_CHOICES = ("apply", "save")
+
+PROVIDERS = {
+    "yandere": {
+        "label": "Yande.re",
+        "url": "https://yande.re/post.json",
+        "site": "https://yande.re",
+        "page_param": "page",
+        "page_start": 1,
+        "max_limit": 100,
+        "ratings": {
+            "safe": "rating:safe",
+            "questionable": "rating:questionable",
+            "explicit": "rating:explicit",
+        },
+    },
+    "konachan": {
+        "label": "Konachan",
+        "url": "https://konachan.net/post.json",
+        "url_all": "https://konachan.com/post.json",
+        "site": "https://konachan.net",
+        "site_all": "https://konachan.com",
+        "page_param": "page",
+        "page_start": 1,
+        "max_limit": 100,
+        "ratings": {
+            "safe": "rating:safe",
+            "questionable": "rating:questionable",
+            "explicit": "rating:explicit",
+        },
+    },
+    "danbooru": {
+        "label": "Danbooru",
+        "url": "https://danbooru.donmai.us/posts.json",
+        "site": "https://danbooru.donmai.us",
+        "page_param": "page",
+        "page_start": 1,
+        "max_limit": 200,
+        "ratings": {
+            "safe": "rating:g",
+            "questionable": "rating:q",
+            "explicit": "rating:e",
+        },
+    },
+    "gelbooru": {
+        "label": "Gelbooru",
+        "url": "https://gelbooru.com/index.php",
+        "site": "https://gelbooru.com",
+        "page_param": "pid",
+        "page_start": 0,
+        "max_limit": 100,
+        "ratings": {
+            "safe": "rating:general",
+            "questionable": "rating:questionable",
+            "explicit": "rating:explicit",
+        },
+    },
+}
+
+DEFAULT_CONFIG = """\
+# anime-wall settings. Keep this file private: it may contain API keys.
+[general]
+download_dir = ~/Pictures/kiri-vault
+default_provider = yandere
+per_page = 24
+rating = safe
+min_score = 0
+min_width = 1920
+min_height = 1080
+orientation = any
+sort = score
+# What Enter does in the result grid: apply (set as wallpaper) or save.
+on_enter = save
+preview_workers = 16
+
+# Gelbooru wants an account API key and user id.
+# https://gelbooru.com/index.php?page=account&s=options
+[gelbooru]
+api_key =
+user_id =
+
+# Only needed for gold-only Danbooru content.
+[danbooru]
+login =
+api_key =
+"""
+
+
+class BooruError(RuntimeError):
+    """An error that is safe to show to the user."""
+
+
+# --------------------------------------------------------------------------
+# Paths and configuration
+# --------------------------------------------------------------------------
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+
+def cache_home() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+
+
+def config_path() -> Path:
+    return config_home() / "anime-wall" / "config.ini"
+
+
+def cache_dir() -> Path:
+    path = cache_home() / "anime-wall"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def load_config(path: Path | None = None) -> configparser.ConfigParser:
+    """Read the ini file, filling in defaults when it does not exist yet."""
+    path = path or config_path()
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    parser.read_string(DEFAULT_CONFIG)
+    try:
+        parser.read(path, encoding="utf-8")
+    except OSError as exc:
+        raise BooruError(f"cannot read {path}: {exc}") from exc
+    return parser
+
+
+def save_config(parser: configparser.ConfigParser, path: Path | None = None) -> None:
+    path = path or config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".ini.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    os.chmod(path, 0o600)
+
+
+def state_file() -> Path:
+    return cache_dir() / "state.json"
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(state_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        state_file().write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def expand(path: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(path)))
+
+
+# --------------------------------------------------------------------------
+# Settings
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Settings:
+    provider: str = "yandere"
+    tags: str = ""
+    rating: str = "safe"
+    min_score: int = 0
+    min_width: int = 1920
+    min_height: int = 1080
+    orientation: str = "any"
+    sort: str = "score"
+    per_page: int = 24
+    page: int = 1
+    on_enter: str = "save"
+    download_dir: Path = field(
+        default_factory=lambda: Path.home() / "Pictures" / "kiri-vault"
+    )
+    preview_workers: int = 16
+
+    @classmethod
+    def from_config(cls, parser: configparser.ConfigParser) -> "Settings":
+        section = parser["general"]
+
+        def number(name: str, fallback: int) -> int:
+            try:
+                return int(section.get(name, fallback))
+            except (TypeError, ValueError):
+                return fallback
+
+        provider = section.get("default_provider", "yandere").strip().lower()
+        if provider not in PROVIDERS:
+            provider = "yandere"
+
+        rating = section.get("rating", "safe").strip().lower()
+        if rating not in RATING_CHOICES:
+            rating = "safe"
+
+        orientation = section.get("orientation", "any").strip().lower()
+        if orientation not in ORIENTATION_CHOICES:
+            orientation = "any"
+
+        sort = section.get("sort", "score").strip().lower()
+        if sort not in SORT_CHOICES:
+            sort = "score"
+
+        on_enter = section.get("on_enter", "save").strip().lower()
+        if on_enter not in ON_ENTER_CHOICES:
+            on_enter = "save"
+
+        download_dir = expand(
+            section.get("download_dir", "~/Pictures/kiri-vault")
+        )
+        return cls(
+            provider=provider,
+            rating=rating,
+            min_score=number("min_score", 0),
+            min_width=number("min_width", 1920),
+            min_height=number("min_height", 1080),
+            orientation=orientation,
+            sort=sort,
+            per_page=max(1, min(number("per_page", 24), 200)),
+            on_enter=on_enter,
+            download_dir=download_dir,
+            preview_workers=max(1, min(number("preview_workers", 16), 32)),
+        )
+
+    def clamp(self) -> None:
+        if self.provider not in PROVIDERS:
+            self.provider = "yandere"
+        if self.rating not in RATING_CHOICES:
+            self.rating = "safe"
+        if self.orientation not in ORIENTATION_CHOICES:
+            self.orientation = "any"
+        if self.sort not in SORT_CHOICES:
+            self.sort = "score"
+        if self.on_enter not in ON_ENTER_CHOICES:
+            self.on_enter = "save"
+        self.per_page = max(1, min(self.per_page, PROVIDERS[self.provider]["max_limit"]))
+        self.page = max(1, self.page)
+
+
+def persist_settings(settings: Settings, parser: configparser.ConfigParser) -> None:
+    """Remember filter changes so the next launch starts where the user left."""
+    if not parser.has_section("general"):
+        parser.add_section("general")
+    section = parser["general"]
+    section["default_provider"] = settings.provider
+    section["rating"] = settings.rating
+    section["min_score"] = str(settings.min_score)
+    section["min_width"] = str(settings.min_width)
+    section["min_height"] = str(settings.min_height)
+    section["orientation"] = settings.orientation
+    section["sort"] = settings.sort
+    section["per_page"] = str(settings.per_page)
+    section["on_enter"] = settings.on_enter
+    try:
+        save_config(parser)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# API access
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Post:
+    provider: str
+    id: int
+    file_url: str
+    preview_url: str
+    width: int
+    height: int
+    score: int
+    rating: str
+    tags: str
+    file_size: int = 0
+    created_at: int = 0
+    site: str = ""
+
+    @property
+    def page_url(self) -> str:
+        if self.provider == "gelbooru":
+            return f"{self.site}/index.php?page=post&s=view&id={self.id}"
+        return f"{self.site}/post/show/{self.id}"
+
+    @property
+    def aspect(self) -> str:
+        if not self.width or not self.height:
+            return "any"
+        ratio = self.width / self.height
+        if 0.95 <= ratio <= 1.05:
+            return "square"
+        return "landscape" if ratio > 1 else "portrait"
+
+    def normalized_rating(self) -> str:
+        raw = (self.rating or "").lower()
+        if raw in {"s", "safe", "g", "general"}:
+            return "safe"
+        if raw in {"q", "questionable"}:
+            return "questionable"
+        if raw in {"e", "explicit"}:
+            return "explicit"
+        if raw == "sensitive":
+            return "safe"
+        return "unknown"
+
+    def label(self) -> str:
+        size = f"{self.width}×{self.height}" if self.width and self.height else "?×?"
+        return f"{size}   ★{self.score}"
+
+
+def http_json(
+    url: str, params: dict, headers: dict | None = None, timeout: int = API_TIMEOUT
+) -> object:
+    query = urllib.parse.urlencode(params)
+    full = f"{url}?{query}" if query else url
+    request_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(full, headers=request_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        snippet = body[:400].decode("utf-8", "replace")
+        if exc.code == 401:
+            raise BooruError(
+                "Gelbooru needs an API key and user id. "
+                "Open the browser menu → “Gelbooru credentials” or fill "
+                "~/.config/anime-wall/config.ini."
+            ) from exc
+        if exc.code == 403 and "Just a moment" in snippet:
+            raise BooruError(
+                "Cloudflare blocked the API request. Open the site once in "
+                "Firefox, then try again; Danbooru often requires JS."
+            ) from exc
+        if exc.code == 429:
+            raise BooruError("Rate limited by the booru. Wait a minute and retry.") from exc
+        if exc.code == 503 and "Downbooru" in snippet:
+            raise BooruError("Danbooru is down right now (503 Downbooru).") from exc
+        raise BooruError(f"HTTP {exc.code} from {urllib.parse.urlparse(url).netloc}") from exc
+    except urllib.error.URLError as exc:
+        raise BooruError(f"network error: {exc.reason}") from exc
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        snippet = body[:200].decode("utf-8", "replace")
+        raise BooruError(f"the booru returned non-JSON data: {snippet!r}") from exc
+
+
+def api_cache_key(settings: Settings) -> str:
+    payload = {
+        "provider": settings.provider,
+        "tags": settings.tags.strip(),
+        "rating": settings.rating,
+        "min_score": settings.min_score,
+        "min_width": settings.min_width,
+        "min_height": settings.min_height,
+        "orientation": settings.orientation,
+        "sort": settings.sort,
+        "per_page": settings.per_page,
+        "page": settings.page,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha1(raw).hexdigest()[:20]
+
+
+def api_cache_path(key: str) -> Path:
+    folder = cache_dir() / "api"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{key}.json"
+
+
+def read_api_cache(key: str) -> tuple[list, float] | None:
+    path = api_cache_path(key)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = payload.get("items")
+        stamp = float(payload.get("ts") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(items, list):
+        return None
+    return items, stamp
+
+
+def cached_raw_count(settings: Settings) -> int:
+    """How many posts the API returned for the current page, before local
+    filters. Pagination must follow this number: filtering can leave fewer
+    than `per_page` items on screen even when a next page exists."""
+    cached = read_api_cache(api_cache_key(settings))
+    if cached is None:
+        return 0
+    items = cached[0]
+    return len(items) if isinstance(items, list) else 0
+
+
+def write_api_cache(key: str, items: list) -> None:
+    path = api_cache_path(key)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"ts": time.time(), "items": items}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+
+
+TAG_CACHE_TTL = 60 * 60 * 6
+TAG_SUGGESTION_LIMIT = 12
+
+
+def tag_cache_path(provider: str, prefix: str) -> Path:
+    folder = cache_dir() / "tags"
+    folder.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(f"{provider}:{prefix}".encode()).hexdigest()[:16]
+    return folder / f"{key}.json"
+
+
+def read_tag_cache(provider: str, prefix: str) -> tuple[list[tuple[str, int]], float] | None:
+    path = tag_cache_path(provider, prefix)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = payload.get("items")
+        stamp = float(payload.get("ts") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(raw, list):
+        return None
+    items: list[tuple[str, int]] = []
+    for entry in raw:
+        if not (isinstance(entry, list) and len(entry) == 2):
+            continue
+        name, count = entry
+        if isinstance(name, str) and name:
+            try:
+                items.append((name, int(count)))
+            except (TypeError, ValueError):
+                continue
+    return items, stamp
+
+
+def write_tag_cache(provider: str, prefix: str, items: list[tuple[str, int]]) -> None:
+    path = tag_cache_path(provider, prefix)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(
+                {"ts": time.time(), "items": [[name, count] for name, count in items]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+
+
+def fetch_tag_suggestions(
+    settings: Settings,
+    parser: configparser.ConfigParser | None,
+    prefix: str,
+    limit: int = TAG_SUGGESTION_LIMIT,
+) -> list[tuple[str, int]]:
+    """Tags starting with `prefix` and their global post counts.
+
+    Yande.re/Konachan use Moebooru's /tag.json, Danbooru uses /tags.json and
+    Gelbooru its autocomplete endpoint. Results are cached for a few hours so
+    Tab feels instant after the first lookup.
+    """
+    provider = settings.provider
+    prefix = prefix.strip().lower()
+    cached = read_tag_cache(provider, prefix)
+    if cached is not None and time.time() - cached[1] < TAG_CACHE_TTL:
+        return cached[0][:limit]
+
+    meta = PROVIDERS[provider]
+    site = meta["site"]
+    items: list[tuple[str, int]] = []
+
+    if provider in ("yandere", "konachan"):
+        params: dict[str, object] = {"limit": limit, "order": "count"}
+        if prefix:
+            params["name"] = prefix
+        data = http_json(f"{site}/tag.json", params, timeout=4)
+        raw = data if isinstance(data, list) else []
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("name"):
+                items.append((str(entry["name"]), int(entry.get("count") or 0)))
+    elif provider == "danbooru":
+        params = {
+            "search[name_matches]": f"{prefix}*",
+            "search[order]": "count",
+            "search[hide_empty]": "true",
+            "limit": limit,
+        }
+        data = http_json(f"{site}/tags.json", params, timeout=4)
+        raw = data if isinstance(data, list) else []
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("name"):
+                items.append(
+                    (str(entry["name"]), int(entry.get("post_count") or 0))
+                )
+    else:  # gelbooru
+        params = {"page": "autocomplete2", "term": prefix, "limit": limit}
+        if parser is not None:
+            api_key = parser.get("gelbooru", "api_key", fallback="").strip()
+            user_id = parser.get("gelbooru", "user_id", fallback="").strip()
+            if api_key and user_id:
+                params["api_key"] = api_key
+                params["user_id"] = user_id
+        data = http_json(f"{site}/index.php", params, timeout=4)
+        raw = data if isinstance(data, list) else []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("label") or entry.get("value") or entry.get("name")
+            if not name:
+                continue
+            count = entry.get("post_count") or entry.get("count") or 0
+            try:
+                items.append((str(name), int(count)))
+            except (TypeError, ValueError):
+                items.append((str(name), 0))
+
+    seen: set[str] = set()
+    unique: list[tuple[str, int]] = []
+    for name, count in items:
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append((name, count))
+    unique = unique[:limit]
+    if unique:
+        write_tag_cache(provider, prefix, unique)
+    return unique
+
+
+def tag_prefix(text: str) -> str:
+    """The unfinished tag at the cursor end of the search line."""
+    if not text or text[-1].isspace():
+        return ""
+    return text.rstrip().split()[-1]
+
+
+def tag_suggestions(
+    settings: Settings,
+    parser: configparser.ConfigParser | None,
+    prefix: str,
+    text: str,
+) -> str | None:
+    """Show matching tags with post counts and splice the chosen one in."""
+    debug(f"tag hints prefix={prefix!r}")
+    try:
+        items = fetch_tag_suggestions(settings, parser, prefix)
+    except BooruError as exc:
+        debug(f"tag hints failed: {exc}")
+        notify("Tag hints", str(exc), 5000)
+        return None
+    if not items:
+        debug("tag hints empty")
+        hint = f"No tags start with “{prefix}”" if prefix else "No tags returned"
+        notify("Tag hints", hint, 2400)
+        return None
+    debug(f"tag hints {len(items)} matches")
+
+    labels: list[str] = []
+    names: dict[str, str] = {}
+    for name, count in items:
+        label = f"{name}   ·   {count:,} posts"
+        labels.append(label)
+        names[label] = name
+    picked = rofi_menu(
+        labels,
+        f"Tags · {prefix}" if prefix else "Popular tags",
+        width=640,
+        lines_visible=min(TAG_SUGGESTION_LIMIT, len(labels)),
+    )
+    if picked is None:
+        return None
+    chosen = names.get(picked)
+    if not chosen:
+        return None
+    tokens = text.split()
+    if tokens and not text[-1:].isspace() and prefix:
+        tokens[-1] = chosen
+    else:
+        tokens.append(chosen)
+    return " ".join(tokens) + " "
+
+
+def extract_raw(data: object) -> list:
+    if isinstance(data, dict):
+        raw = data.get("post") or []
+    elif isinstance(data, list):
+        raw = data
+    else:
+        raw = []
+    return raw if isinstance(raw, list) else []
+
+
+def build_posts(
+    raw: list, provider: str, site: str, settings: Settings
+) -> list[Post]:
+    posts: list[Post] = []
+    for item in raw:
+        post = normalize(item, provider, site)
+        if post and passes_filters(post, settings):
+            posts.append(post)
+    sort_posts(posts, settings.sort)
+    return posts
+
+
+def fetch_posts(
+    settings: Settings,
+    parser: configparser.ConfigParser,
+    *,
+    use_cache: bool = True,
+    quiet: bool = False,
+) -> list[Post]:
+    settings.clamp()
+    provider = settings.provider
+    meta = PROVIDERS[provider]
+
+    url = meta["url"]
+    site = meta["site"]
+    if provider == "konachan" and settings.rating != "safe":
+        url = meta.get("url_all", url)
+        site = meta.get("site_all", site)
+
+    key = api_cache_key(settings)
+    cached = read_api_cache(key)
+    if use_cache and cached is not None and time.time() - cached[1] <= API_CACHE_TTL:
+        return build_posts(cached[0], provider, site, settings)
+
+    tags = settings.tags.strip()
+    rating_tag = meta["ratings"].get(settings.rating)
+    if rating_tag and settings.rating != "all":
+        tags = f"{tags} {rating_tag}".strip()
+
+    params: dict[str, object] = {
+        "tags": tags,
+        "limit": min(settings.per_page, meta["max_limit"]),
+        meta["page_param"]: meta["page_start"] + settings.page - 1,
+    }
+    headers: dict[str, str] = {}
+    if provider == "gelbooru":
+        api_key = parser.get("gelbooru", "api_key", fallback="").strip()
+        user_id = parser.get("gelbooru", "user_id", fallback="").strip()
+        if not api_key or not user_id:
+            if cached is not None:
+                if not quiet:
+                    notify(
+                        "anime-wall",
+                        "Gelbooru: no API keys — showing saved results",
+                        3000,
+                    )
+                return build_posts(cached[0], provider, site, settings)
+            raise BooruError(
+                "Gelbooru needs an API key and user id. "
+                "Open the browser menu → “Gelbooru credentials”."
+            )
+        params.update(
+            {
+                "page": "dapi",
+                "s": "post",
+                "q": "index",
+                "json": "1",
+                "api_key": api_key,
+                "user_id": user_id,
+            }
+        )
+    elif provider == "danbooru":
+        login = parser.get("danbooru", "login", fallback="").strip()
+        api_key = parser.get("danbooru", "api_key", fallback="").strip()
+        if login and api_key:
+            import base64
+
+            token = base64.b64encode(f"{login}:{api_key}".encode()).decode()
+            headers["Authorization"] = f"Basic {token}"
+
+    try:
+        data = http_json(url, params, headers)
+    except BooruError:
+        if cached is not None:
+            if not quiet:
+                notify(
+                    "anime-wall",
+                    "Server is unreachable — showing cached results",
+                    3000,
+                )
+            return build_posts(cached[0], provider, site, settings)
+        raise
+
+    raw = extract_raw(data)
+    write_api_cache(key, raw)
+    return build_posts(raw, provider, site, settings)
+
+
+def normalize(item: dict, provider: str, site: str) -> Post | None:
+    if not isinstance(item, dict):
+        return None
+    file_url = (
+        item.get("file_url")
+        or item.get("large_file_url")
+        or ""
+    )
+    preview_url = (
+        item.get("preview_url")
+        or item.get("preview_file_url")
+        or item.get("sample_url")
+        or item.get("large_file_url")
+        or file_url
+    )
+    if not file_url or not preview_url:
+        return None
+    if urllib.parse.urlparse(file_url).scheme not in {"http", "https"}:
+        return None
+    extension = Path(urllib.parse.urlparse(file_url).path).suffix.lower()
+    if extension and extension not in IMAGE_EXTENSIONS:
+        return None
+
+    width = item.get("width") or item.get("image_width") or 0
+    height = item.get("height") or item.get("image_height") or 0
+    tags = item.get("tags") or item.get("tag_string") or ""
+    try:
+        post_id = int(item.get("id"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        score = int(item.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0
+    try:
+        file_size = int(item.get("file_size") or 0)
+    except (TypeError, ValueError):
+        file_size = 0
+    try:
+        created_at = int(item.get("created_at") or 0)
+    except (TypeError, ValueError):
+        created_at = 0
+
+    return Post(
+        provider=provider,
+        id=post_id,
+        file_url=file_url,
+        preview_url=preview_url,
+        width=int(width or 0),
+        height=int(height or 0),
+        score=score,
+        rating=str(item.get("rating") or ""),
+        tags=tags,
+        file_size=file_size,
+        created_at=created_at,
+        site=site,
+    )
+
+
+def passes_filters(post: Post, settings: Settings) -> bool:
+    if settings.rating != "all":
+        rating = post.normalized_rating()
+        if rating != "unknown" and rating != settings.rating:
+            return False
+    if post.score < settings.min_score:
+        return False
+    if settings.min_width and post.width and post.width < settings.min_width:
+        return False
+    if settings.min_height and post.height and post.height < settings.min_height:
+        return False
+    if settings.orientation != "any" and post.aspect != settings.orientation:
+        return False
+    return True
+
+
+def sort_posts(posts: list[Post], mode: str) -> None:
+    if mode == "new":
+        posts.sort(key=lambda post: (post.created_at, post.id), reverse=True)
+    elif mode == "random":
+        import random
+
+        random.shuffle(posts)
+    else:
+        posts.sort(key=lambda post: (post.score, post.id), reverse=True)
+
+
+# --------------------------------------------------------------------------
+# Downloading
+# --------------------------------------------------------------------------
+
+
+def safe_name(post: Post) -> str:
+    extension = Path(urllib.parse.urlparse(post.file_url).path).suffix.lower()
+    if extension not in IMAGE_EXTENSIONS:
+        extension = ".jpg"
+    return f"{post.provider}_{post.id}{extension}"
+
+
+def provider_folder(root: Path, provider: str) -> Path:
+    """Store each booru in its own full-name folder inside Pictures."""
+    label = PROVIDERS.get(provider, {}).get("label", provider.title())
+    return root / label
+
+
+def looks_like_image(data: bytes) -> bool:
+    if data.startswith(IMAGE_MAGIC):
+        return True
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def valid_image_file(path: Path, size: int = 16) -> bool:
+    try:
+        if path.stat().st_size <= 0:
+            return False
+        with path.open("rb") as handle:
+            return looks_like_image(handle.read(size))
+    except OSError:
+        return False
+
+
+def download(post: Post, folder: Path) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / safe_name(post)
+    lock = target.with_suffix(target.suffix + ".lock")
+    try:
+        with lock.open("a") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            if target.exists() and target.stat().st_size > 0:
+                return target
+
+            request = urllib.request.Request(
+                post.file_url,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Referer": post.site + "/",
+                    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                },
+            )
+            tmp = target.with_suffix(target.suffix + ".part")
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=DOWNLOAD_TIMEOUT
+                ) as response, tmp.open("wb") as handle:
+                    shutil.copyfileobj(response, handle, length=1024 * 256)
+            except urllib.error.HTTPError as exc:
+                tmp.unlink(missing_ok=True)
+                raise BooruError(f"download failed: HTTP {exc.code}") from exc
+            except urllib.error.URLError as exc:
+                tmp.unlink(missing_ok=True)
+                raise BooruError(f"download failed: {exc.reason}") from exc
+            except (OSError, TimeoutError) as exc:
+                tmp.unlink(missing_ok=True)
+                raise BooruError(f"download failed: {exc}") from exc
+            if not valid_image_file(tmp):
+                tmp.unlink(missing_ok=True)
+                raise BooruError("download failed: server returned a non-image")
+            tmp.replace(target)
+            return target
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def notify(title: str, body: str, timeout: int = 2500) -> None:
+    if not shutil.which("notify-send"):
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "anime-wall", "-t", str(timeout), title, body],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def debug(message: str) -> None:
+    """Opt-in tracing: ANIME_WALL_DEBUG=1 anime-wall"""
+    if os.environ.get("ANIME_WALL_DEBUG"):
+        print(f"[anime-wall] {message}", file=sys.stderr, flush=True)
+
+
+def wallpaper_apply_command() -> list[str] | None:
+    candidates = [
+        Path.home() / "bin" / "random_wallpaper",
+        Path.home() / ".local" / "bin" / "random_wallpaper",
+    ]
+    for candidate in candidates:
+        if os.access(candidate, os.X_OK):
+            return [str(candidate)]
+    found = shutil.which("random_wallpaper")
+    return [found] if found else None
+
+
+def apply_wallpaper(path: Path) -> None:
+    command = wallpaper_apply_command()
+    if command:
+        result = subprocess.run(command + ["--set", str(path)], check=False)
+        if result.returncode == 0:
+            return
+    feh = shutil.which("feh")
+    if feh:
+        subprocess.run([feh, "--no-fehbg", "--bg-fill", str(path)], check=False)
+        return
+    raise BooruError("neither random_wallpaper nor feh is installed")
+
+
+def wallpaper_folder() -> Path:
+    """The desktop wallpaper library scanned by random_wallpaper."""
+    return Path.home() / "Images" / "Wallpaper_desktop"
+
+
+def archive_wallpaper(source: Path) -> Path:
+    """Copy an applied artwork into the desktop wallpaper library.
+
+    Without this, an image applied from Anime Wall lived only in
+    ~/Pictures/kiri-vault, so it could not be found again with the wallpaper
+    picker. A file with the same name and content is reused; a different file
+    with the same name gets a -2, -3 … suffix instead of being overwritten.
+    """
+    folder = wallpaper_folder()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        if source.resolve().parent == folder.resolve():
+            return source
+    except OSError:
+        return source
+
+    target = folder / source.name
+    counter = 2
+    while target.exists():
+        try:
+            if target.stat().st_size == source.stat().st_size and filecmp.cmp(
+                source, target, shallow=False
+            ):
+                return target
+        except OSError:
+            pass
+        target = folder / f"{source.stem}-{counter}{source.suffix}"
+        counter += 1
+
+    tmp = folder / f".{target.name}.{os.getpid()}.tmp"
+    try:
+        shutil.copy2(source, tmp)
+        os.replace(tmp, target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return source
+    return target
+
+
+# --------------------------------------------------------------------------
+# Rofi UI
+# --------------------------------------------------------------------------
+
+
+def rofi_binary() -> str:
+    found = shutil.which("rofi")
+    if not found:
+        raise BooruError("rofi is not installed")
+    return found
+
+
+def clean_rofi_pid() -> None:
+    """Remove a stale rofi pid file left behind by a killed instance.
+
+    rofi normally does this itself, but a dirty build or a hard kill can leave
+    the file behind and make the next launch look like it did nothing.
+    """
+    runtime = Path(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    )
+    pidfile = runtime / "rofi.pid"
+    try:
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        pidfile.unlink(missing_ok=True)
+
+
+# rofi 2.x on X11 needs a settling period after each invocation. 250 ms is
+# enough for the old window to disappear, while keeping page flips snappy.
+_ROFI_COOLDOWN = 0.25
+
+
+def rofi_cooldown() -> None:
+    """Give X11 time to release the pointer/keyboard grab."""
+    time.sleep(_ROFI_COOLDOWN)
+
+
+def screen_size() -> tuple[int, int]:
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "getdisplaygeometry"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        width, height = out.split()
+        return int(width), int(height)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 1920, 1080
+
+
+def rofi_theme_args() -> list[str]:
+    # rofi always reads ~/.config/rofi/config.rasi, which imports the generated
+    # palette (theme.rasi). Passing -theme here would replace that import and
+    # leave @bg-col/@blue undefined.
+    return []
+
+
+GRID_THEME = """
+window {
+    width: 1400px;
+    height: 900px;
+    border: 2px;
+    border-color: @border-col;
+    border-radius: 10px;
+    background-color: @bg-col;
+    padding: 0;
+}
+mainbox {
+    background-color: @bg-col;
+    padding: 10px;
+}
+inputbar {
+    background-color: @bg-col;
+    padding: 8px;
+    margin: 0 0 10px 0;
+}
+prompt {
+    background-color: @blue;
+    text-color: @bg-col;
+    padding: 5px 10px;
+    border-radius: 4px;
+}
+entry {
+    text-color: @fg-col;
+    padding: 5px 10px;
+}
+listview {
+    columns: 4;
+    lines: 3;
+    spacing: 12px;
+    padding: 4px;
+    margin: 0;
+    background-color: @bg-col;
+    scrollbar: false;
+    fixed-columns: true;
+    dynamic: false;
+}
+element {
+    orientation: vertical;
+    padding: 8px;
+    spacing: 4px;
+    border-radius: 8px;
+    background-color: @bg-col-light;
+    text-color: @fg-col;
+}
+element selected {
+    background-color: @selected-col;
+    text-color: @fg-col2;
+    border: 2px;
+    border-color: @blue;
+}
+element-icon {
+    size: 240px;
+    border-radius: 6px;
+}
+element-text {
+    horizontal-align: 0.5;
+    vertical-align: 0.5;
+}
+message {
+    background-color: @bg-col;
+    text-color: @grey;
+    padding: 4px 8px;
+}
+textbox {
+    background-color: @bg-col;
+    text-color: @grey;
+}
+"""
+
+MENU_THEME = """
+window {
+    width: 820px;
+    height: 520px;
+    border: 2px;
+    border-color: @border-col;
+    border-radius: 10px;
+    background-color: @bg-col;
+}
+mainbox {
+    background-color: @bg-col;
+    padding: 10px;
+}
+inputbar {
+    background-color: @bg-col;
+}
+prompt {
+    background-color: @blue;
+    text-color: @bg-col;
+    padding: 5px 10px;
+    border-radius: 4px;
+}
+entry {
+    text-color: @fg-col;
+    padding: 5px 10px;
+}
+element {
+    padding: 7px 10px;
+    border-radius: 5px;
+    background-color: @bg-col;
+    text-color: @fg-col;
+}
+element selected {
+    background-color: @selected-col;
+    text-color: @fg-col2;
+}
+listview {
+    columns: 1;
+    lines: 10;
+    scrollbar: false;
+    background-color: @bg-col;
+}
+message {
+    background-color: @bg-col;
+    text-color: @grey;
+    padding: 4px 8px;
+}
+textbox {
+    background-color: @bg-col;
+    text-color: @grey;
+}
+"""
+
+# Dedicated compact theme for the tag-search bar. It is tall enough for the
+# input line, the hint line and one result row, so the editable entry is never
+# clipped off the top of the window.
+SEARCH_THEME = """
+window {
+    width: 820px;
+    height: 190px;
+    border: 2px;
+    border-color: @border-col;
+    border-radius: 10px;
+    background-color: @bg-col;
+}
+mainbox {
+    background-color: @bg-col;
+    padding: 12px;
+}
+inputbar {
+    background-color: @bg-col;
+    padding: 6px;
+    margin: 0 0 6px 0;
+}
+prompt {
+    background-color: @blue;
+    text-color: @bg-col;
+    padding: 5px 10px;
+    border-radius: 4px;
+}
+entry {
+    text-color: @fg-col;
+    padding: 5px 10px;
+}
+listview {
+    columns: 1;
+    lines: 1;
+    scrollbar: false;
+    background-color: @bg-col;
+}
+element {
+    padding: 6px 10px;
+    border-radius: 5px;
+    background-color: @bg-col;
+    text-color: @fg-col;
+}
+element selected {
+    background-color: @selected-col;
+    text-color: @fg-col2;
+}
+message {
+    background-color: @bg-col;
+    text-color: @grey;
+    padding: 2px 4px;
+}
+textbox {
+    background-color: @bg-col;
+    text-color: @grey;
+}
+"""
+
+FALLBACK_COLORS = [
+    ("@border-col", "#9081da"),
+    ("@bg-col-light", "#312e3d"),
+    ("@selected-col", "#312e3d"),
+    ("@fg-col2", "#c28cd9"),
+    ("@bg-col", "#141319"),
+    ("@fg-col", "#ececee"),
+    ("@blue", "#9081da"),
+    ("@grey", "#928fa3"),
+]
+
+
+def themed_args(theme_str: str) -> list[str]:
+    args = rofi_theme_args()
+    if not (config_home() / "rofi" / "theme.rasi").is_file():
+        for name, value in FALLBACK_COLORS:
+            theme_str = theme_str.replace(name, value)
+    return args + ["-theme-str", theme_str]
+
+
+def rofi_menu(lines: list[str], prompt: str, *, width: int = 700, lines_visible: int = 10) -> str | None:
+    if not lines:
+        return None
+    clean_rofi_pid()
+    screen_w, screen_h = screen_size()
+    width = min(width, max(420, screen_w - 80))
+    lines_visible = max(1, min(lines_visible, max(3, (screen_h - 160) // 42)))
+    text = "\n".join(lines) + "\n"
+    theme = MENU_THEME.replace("lines: 10;", f"lines: {lines_visible};")
+    theme = theme.replace("width: 820px;", f"width: {width}px;")
+    menu_height = min(100 + lines_visible * 42, screen_h - 100)
+    theme = theme.replace("height: 520px;", f"height: {menu_height}px;")
+    command = [
+        rofi_binary(),
+        "-dmenu",
+        "-i",
+        "-no-history",
+        "-no-custom",
+        "-p",
+        prompt,
+    ]
+    command += themed_args(theme)
+    try:
+        result = subprocess.run(
+            command,
+            input=text.encode(),
+            stdout=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise BooruError(f"cannot start rofi: {exc}") from exc
+    if result.returncode != 0:
+        rofi_cooldown()
+        return None
+    rofi_cooldown()
+    return result.stdout.decode("utf-8", "replace").strip() or None
+
+
+def rofi_text(prompt: str, initial: str = "") -> str | None:
+    """Free-text prompt. The previous value is offered as a selectable line."""
+    clean_rofi_pid()
+    lines = [initial] if initial else []
+    text = "\n".join(lines) + ("\n" if lines else "")
+    theme = MENU_THEME.replace("height: 520px;", "height: 140px;")
+    theme = theme.replace("lines: 10;", "lines: 1;")
+    command = [
+        rofi_binary(),
+        "-dmenu",
+        "-i",
+        "-no-history",
+        "-p",
+        prompt,
+    ] + themed_args(theme)
+    try:
+        result = subprocess.run(
+            command,
+            input=text.encode(),
+            stdout=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise BooruError(f"cannot start rofi: {exc}") from exc
+    if result.returncode != 0:
+        rofi_cooldown()
+        return None
+    rofi_cooldown()
+    return result.stdout.decode("utf-8", "replace").strip()
+
+
+def rofi_error(message: str) -> None:
+    notify("anime-wall", message, 6000)
+
+
+def preview_path(post: Post) -> Path:
+    folder = cache_dir() / "previews"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{post.provider}_{post.id}.img"
+
+
+def placeholder_preview() -> Path | None:
+    """A calm grey thumbnail for posts whose preview has not arrived yet."""
+    folder = cache_dir() / "previews"
+    target = folder / "_placeholder.png"
+    if valid_image_file(target):
+        return target
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    size = 320
+    image = Image.new("RGB", (size, size), "#24222e")
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(
+        (28, 28, size - 28, size - 28),
+        radius=18,
+        outline="#4a4658",
+        width=4,
+    )
+    # Tiny landscape glyph: sun + two hills.
+    draw.ellipse((196, 80, 250, 134), fill="#8a7fb0")
+    draw.polygon(
+        [(44, 250), (132, 150), (196, 214), (246, 164), (278, 250)],
+        fill="#38344a",
+    )
+    tmp = target.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        image.save(tmp, format="PNG")
+        tmp.replace(target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return None
+    return target
+
+
+def download_preview(post: Post) -> Path | None:
+    target = preview_path(post)
+    if valid_image_file(target):
+        return target
+    if target.exists():
+        target.unlink(missing_ok=True)
+    request = urllib.request.Request(
+        post.preview_url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Referer": post.site + "/",
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=PREVIEW_TIMEOUT) as response:
+            data = response.read(6 * 1024 * 1024 + 1)
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    if not data or len(data) > 6 * 1024 * 1024 or not looks_like_image(data):
+        return None
+    tmp = target.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return None
+    return target
+
+
+def spawn_preview_prefetch(posts: list[Post]) -> None:
+    if not posts:
+        return
+    try:
+        payload = json.dumps([asdict(post) for post in posts], ensure_ascii=False)
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--prefetch-previews",
+                payload,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        pass
+
+
+def fetch_previews(
+    posts: list[Post],
+    workers: int,
+    *,
+    budget: float = PREVIEW_BUDGET,
+    spawn: bool = True,
+) -> dict[int, Path]:
+    """Return whatever previews are ready within a short, hard budget.
+
+    Cached thumbnails are picked up instantly. Missing ones are fetched in
+    parallel; after `budget` seconds we stop waiting and show the grid with the
+    thumbnails that arrived, while a detached process fills the cache for the
+    next open.
+    """
+    previews: dict[int, Path] = {}
+    pending: list[Post] = []
+    for post in posts:
+        target = preview_path(post)
+        if valid_image_file(target):
+            previews[post.id] = target
+        else:
+            pending.append(post)
+    if not pending:
+        return previews
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {pool.submit(download_preview, post): post for post in pending}
+    done, _ = concurrent.futures.wait(futures, timeout=budget)
+    for future in done:
+        post = futures[future]
+        try:
+            path = future.result()
+        except Exception:
+            path = None
+        if path is not None:
+            previews[post.id] = path
+    pool.shutdown(wait=False, cancel_futures=True)
+    if spawn and len(previews) < len(posts):
+        spawn_preview_prefetch([post for post in posts if post.id not in previews])
+    return previews
+
+
+def refresh_previews(posts: list[Post], previews: dict[int, Path]) -> None:
+    """Pick up thumbnails the background worker finished while the grid was
+    open, so reopening it after a save upgrades placeholders without a wait."""
+    for post in posts:
+        if post.id in previews:
+            continue
+        target = preview_path(post)
+        if valid_image_file(target):
+            previews[post.id] = target
+
+
+def build_entries(
+    posts: list[Post],
+    previews: dict[int, Path],
+    download_root: Path,
+    pending_ids: set[int] | None = None,
+) -> bytes:
+    pending_ids = pending_ids or set()
+    placeholder = placeholder_preview()
+    chunks: list[bytes] = []
+    for post in posts:
+        label = post.label()
+        target = provider_folder(download_root, post.provider) / safe_name(post)
+        if post.id in pending_ids or target.exists():
+            label = "✓ " + label
+        line = label.encode()
+        icon = previews.get(post.id) or placeholder
+        if icon:
+            line += b"\0icon\x1f" + str(icon).encode()
+        chunks.append(line + b"\n")
+    return b"".join(chunks)
+
+
+def grid_index(result: subprocess.CompletedProcess, count: int) -> int | None:
+    raw = result.stdout.decode("utf-8", "replace").strip()
+    if raw.isdigit():
+        index = int(raw)
+        if 0 <= index < count:
+            return index
+    return None
+
+
+# Thumbnail grid metrics. The numbers mirror GRID_THEME: element padding,
+# listview spacing and one text line below the icon. Keeping them in one place
+# lets the window shrink to the cells it shows on any monitor. Rofi adds a few
+# hidden pixels to every row, so GRID_ROW_EXTRA is deliberately generous: a
+# slightly short window silently hides the last row.
+GRID_ICON_MIN = 120
+GRID_ICON_MAX = 420
+GRID_ELEMENT_PAD = 8
+GRID_CELL_GAP = 12
+GRID_ROW_EXTRA = 65
+GRID_CHROME = 136
+
+
+def grid_layout(count: int) -> tuple[int, int, int, int, int]:
+    """Scale the grid to the screen.
+
+    Rofi fills a multi-column dmenu top-to-bottom, so the layout is chosen by
+    row count: ``columns = ceil(count / rows)``. That keeps the window width
+    equal to the columns actually drawn (no empty strip on the right) and
+    guarantees no item is left out. Returns
+    ``(width, height, columns, lines, icon)``.
+    """
+    screen_w, screen_h = screen_size()
+    max_w = max(560, screen_w - 120)
+    max_h = max(360, screen_h - 40)
+    icon_cap = int(min(GRID_ICON_MAX, max(GRID_ICON_MIN + 60, screen_h * 0.20)))
+    cell_extra_w = 2 * GRID_ELEMENT_PAD + GRID_CELL_GAP
+
+    best: tuple[float, int, int, int] | None = None
+    # Never stack fewer than ~4 items per row: a five-result page should be a
+    # wide banner, not one tall column of giant thumbnails.
+    rows_cap = max(1, min(8, (count + 3) // 4))
+    for rows in range(1, rows_cap + 1):
+        columns = (count + rows - 1) // rows
+        if columns > 9:
+            continue
+        icon_w = (max_w - 16) / columns - cell_extra_w
+        if icon_w < GRID_ICON_MIN:
+            continue
+        icon_h = (max_h - GRID_CHROME - 8) / rows - GRID_ROW_EXTRA
+        icon = int(min(icon_w, icon_h, icon_cap))
+        if icon < GRID_ICON_MIN:
+            icon = GRID_ICON_MIN
+        cell_w = icon + cell_extra_w
+        row_h = icon + GRID_ROW_EXTRA
+        lines = max(1, min(rows, (max_h - GRID_CHROME - 8) // row_h))
+        width = min(max_w, max(720, columns * cell_w + 16))
+        height = min(max_h, GRID_CHROME + lines * row_h + 8)
+        fill = (width / max_w) * (height / max_h)
+        # A completely filled grid looks tidier: prefer row counts where every
+        # column is full (24 results -> 6x4 rather than 5x5 with a gap).
+        slots = rows * columns
+        ragged = (slots - count) / slots if slots else 0.0
+        # Keep the grid from becoming one huge row or a single tall column.
+        aspect = (columns * cell_w) / (lines * row_h)
+        score = fill - 0.06 * ragged - 0.04 * abs(aspect - 1.6)
+        if best is None or score > best[0]:
+            best = (score, columns, lines, icon)
+
+    if best is None:
+        rows = max(1, min(4, count))
+        columns = (count + rows - 1) // rows
+        icon = GRID_ICON_MIN
+        cell_w = icon + cell_extra_w
+        row_h = icon + GRID_ROW_EXTRA
+        return (
+            min(max_w, max(720, columns * cell_w + 16)),
+            min(max_h, GRID_CHROME + rows * row_h + 8),
+            columns,
+            rows,
+            icon,
+        )
+
+    _, columns, lines, icon = best
+    cell_w = icon + cell_extra_w
+    row_h = icon + GRID_ROW_EXTRA
+    width = min(max_w, max(720, columns * cell_w + 16))
+    height = min(max_h, GRID_CHROME + lines * row_h + 8)
+    return width, height, columns, lines, icon
+
+
+def run_grid(
+    entries: bytes,
+    prompt: str,
+    count: int,
+    has_next: bool,
+    on_enter: str,
+    selected_row: int = 0,
+    has_prev: bool = False,
+) -> tuple[str, int | None]:
+    """Run the thumbnail grid.
+
+    Returns ("pick"|"save"|"apply"|"next"|"prev"|"page"|"quit"|"cancel",
+    index). All actions are plain rofi custom keys, so the window reacts
+    immediately: Enter follows the configured action, Alt+S saves only,
+    Alt+A applies, Alt+B/Alt+N change pages, Alt+G picks a page by number.
+    `selected_row` keeps the user's place when the grid reopens after a save.
+    """
+    clean_rofi_pid()
+    selected_row = max(0, min(selected_row, max(0, count - 1)))
+    command = [
+        rofi_binary(),
+        "-dmenu",
+        "-i",
+        "-no-history",
+        "-no-custom",
+        "-show-icons",
+        "-format",
+        "i",
+        "-p",
+        prompt,
+        "-selected-row",
+        str(selected_row),
+        # Alt+S is rofi's default screenshot shortcut; free it before binding
+        # it as our custom key, otherwise rofi refuses to start (exit 65).
+        "-kb-screenshot",
+        "",
+        # Alt+B is rofi's "move word back"; free it so the previous-page key
+        # does not make rofi show a configuration error instead of the grid.
+        "-kb-move-word-back",
+        "Control+Left",
+        "-kb-custom-2",
+        "Alt+s",
+        "-kb-custom-3",
+        "Alt+a",
+        "-kb-custom-4",
+        "Alt+q",
+        "-kb-custom-5",
+        "Alt+g",
+    ]
+    if has_prev:
+        command += ["-kb-custom-6", "Alt+b"]
+    if has_next:
+        command += ["-kb-custom-1", "Alt+n"]
+    enter_label = "apply" if on_enter == "apply" else "save"
+    parts = [
+        f"Enter — {enter_label}",
+        "Alt+A — wallpaper",
+        "Alt+S — save only",
+    ]
+    if has_prev:
+        parts.append("Alt+B — prev page")
+    if has_next:
+        parts.append("Alt+N — next page")
+    parts += ["Alt+G — go to page", "Alt+Q — quit", "Esc — search"]
+    command += ["-mesg", "   ·   ".join(parts)]
+
+    width, height, columns, lines, icon = grid_layout(count)
+    grid_theme = GRID_THEME.replace("width: 1400px;", f"width: {width}px;")
+    grid_theme = grid_theme.replace("height: 900px;", f"height: {height}px;")
+    grid_theme = grid_theme.replace("columns: 4;", f"columns: {columns};")
+    grid_theme = grid_theme.replace("lines: 3;", f"lines: {lines};")
+    grid_theme = grid_theme.replace("size: 240px;", f"size: {icon}px;")
+    command += themed_args(grid_theme)
+    try:
+        result = subprocess.run(
+            command,
+            input=entries,
+            stdout=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise BooruError(f"cannot start rofi: {exc}") from exc
+    debug(
+        f"grid rofi rc={result.returncode} "
+        f"has_next={has_next} has_prev={has_prev} count={count}"
+    )
+    if result.returncode == 10 and has_next:
+        rofi_cooldown()
+        return "next", None
+    if result.returncode == 11:
+        rofi_cooldown()
+        return "save", grid_index(result, count)
+    if result.returncode == 12:
+        rofi_cooldown()
+        return "apply", grid_index(result, count)
+    if result.returncode == 13:
+        rofi_cooldown()
+        return "quit", None
+    if result.returncode == 14:
+        rofi_cooldown()
+        return "page", None
+    if result.returncode == 15 and has_prev:
+        rofi_cooldown()
+        return "prev", None
+    if result.returncode != 0:
+        rofi_cooldown()
+        return "cancel", None
+    index = grid_index(result, count)
+    rofi_cooldown()
+    return ("pick", index) if index is not None else ("cancel", None)
+
+
+def ordered_choices(choices: list[str], current: str) -> list[str]:
+    """Put the current value first so Enter keeps it instead of jumping to #1."""
+    if current in choices:
+        return [current] + [choice for choice in choices if choice != current]
+    return list(choices)
+
+
+def prompt_choice(prompt: str, choices: list[str], current: str) -> str | None:
+    ordered = ordered_choices(choices, current)
+    marked = [
+        f"● {choice}" if choice == current else f"○ {choice}"
+        for choice in ordered
+    ]
+    picked = rofi_menu(marked, prompt, lines_visible=len(marked))
+    if picked is None:
+        return None
+    return picked[2:]
+
+
+def page_picker(settings: Settings) -> int | None:
+    """Jump straight to a page: pick one from the list or type its number."""
+    current = settings.page
+    last = max(99, current + 15)
+    labels = [
+        f"{'●' if number == current else '○'} Page {number}"
+        for number in range(1, last + 1)
+    ]
+    picked = rofi_menu(labels, "Go to page", width=460, lines_visible=12)
+    if picked is None:
+        return None
+    match = re.search(r"(\d+)", picked)
+    if not match:
+        return None
+    return max(1, int(match.group(1)))
+
+
+def prompt_int(prompt: str, current: int, minimum: int = 0) -> int | None:
+    raw = rofi_text(prompt, str(current))
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        rofi_error(f"Not a number: {raw}")
+        return None
+    return max(minimum, value)
+
+
+def prompt_size(current_w: int, current_h: int) -> tuple[int, int] | None:
+    presets = [
+        (0, 0),
+        (1280, 720),
+        (1920, 1080),
+        (2560, 1440),
+        (3840, 2160),
+    ]
+    labels = ["Any size" if (w, h) == (0, 0) else f"{w}×{h}" for w, h in presets]
+    pairs = list(zip(labels, presets))
+    current = (current_w, current_h)
+    # Put the current size first: rofi selects the first line by default, and
+    # Enter should keep the current value.
+    if current in presets:
+        index = presets.index(current)
+        pairs = [pairs[index]] + [pair for i, pair in enumerate(pairs) if i != index]
+    marked = [
+        f"● {label}" if size == current else f"○ {label}"
+        for label, size in pairs
+    ]
+    marked.append("○ Custom…")
+    picked = rofi_menu(marked, "Minimum size", lines_visible=len(marked))
+    if picked is None:
+        return None
+    value = picked[2:].strip()
+    if value == "Custom…":
+        raw = rofi_text("min width × min height", f"{current_w}×{current_h}")
+        if raw is None:
+            return None
+        match = re.match(r"\s*(\d+)\s*[x×*]\s*(\d+)", raw)
+        if not match:
+            rofi_error("Use the form 1920×1080")
+            return None
+        return int(match.group(1)), int(match.group(2))
+    for label, size in pairs:
+        if value == label:
+            return size
+    return None
+
+
+def prompt_tags(current: str) -> str | None:
+    raw = rofi_text("Tags", current)
+    if raw is None:
+        return None
+    return " ".join(raw.split())
+
+
+def prompt_gelbooru(parser: configparser.ConfigParser) -> bool:
+    api_key = rofi_text(
+        "Gelbooru API key",
+        parser.get("gelbooru", "api_key", fallback="").strip(),
+    )
+    if api_key is None:
+        return False
+    user_id = rofi_text(
+        "Gelbooru user id",
+        parser.get("gelbooru", "user_id", fallback="").strip(),
+    )
+    if user_id is None:
+        return False
+    if not parser.has_section("gelbooru"):
+        parser.add_section("gelbooru")
+    parser.set("gelbooru", "api_key", api_key.strip())
+    parser.set("gelbooru", "user_id", user_id.strip())
+    save_config(parser)
+    notify("anime-wall", "Gelbooru credentials saved")
+    return True
+
+
+def search_prompt(
+    current_tags: str,
+    settings: Settings,
+    notice: str = "",
+    parser: configparser.ConfigParser | None = None,
+) -> tuple[str, str | None]:
+    """Free-text tag prompt — the main entry point.
+
+    Tab (or Alt+T) asks the booru for tag completions starting with the
+    unfinished word and shows how many posts each tag has. The rest of the
+    line is preserved, so several tags can be added one by one.
+
+    Returns ("search"|"filters"|"provider"|"quit"|"cancel", tags_or_None).
+    """
+    clean_rofi_pid()
+    screen_w = screen_size()[0]
+    width = min(900, max(720, int(screen_w * 0.36)))
+    provider = PROVIDERS[settings.provider]
+    size = (
+        "any size"
+        if not settings.min_width and not settings.min_height
+        else f"≥{settings.min_width}×{settings.min_height}"
+    )
+    summary = (
+        f"{provider['label']}  ·  {settings.rating}  ·  {size}"
+        f"  ·  {settings.orientation}  ·  {settings.sort}"
+    )
+    hint = (
+        "Enter: search    Tab: tag hints    Alt+F: filters    "
+        "Alt+P: provider    Alt+Q: quit"
+    )
+    text = current_tags
+    while True:
+        theme = SEARCH_THEME.replace("width: 820px;", f"width: {width}px;")
+        if notice:
+            theme = theme.replace("height: 190px;", "height: 268px;")
+        message = f"{notice}\n{summary}\n{hint}" if notice else f"{summary}\n{hint}"
+        command = [
+            rofi_binary(),
+            "-dmenu",
+            "-i",
+            "-no-history",
+            "-p",
+            "Tag search",
+            "-mesg",
+            message,
+            # rofi binds Alt+f to "move word forward"; keep only Ctrl+Right so
+            # the plain Alt+f shortcut below works without needing Shift.
+            "-kb-move-word-forward",
+            "Control+Right",
+            # Tab is normally "next element"; freeing it lets Tab open the tag
+            # hint menu instead of moving the selection.
+            "-kb-element-next",
+            "",
+            "-kb-custom-1",
+            "Alt+f",
+            "-kb-custom-2",
+            "Alt+p",
+            "-kb-custom-3",
+            "Alt+q",
+            # custom-4 returns 13, which this prompt reserves for "cancel";
+            # Tab/Alt+T therefore use custom-5 (14) and custom-6 (15).
+            "-kb-custom-5",
+            "Tab",
+            "-kb-custom-6",
+            "Alt+t",
+        ]
+        if text:
+            command += ["-filter", text]
+        command += themed_args(theme)
+        # dmenu expects list items on stdin; the actual query lives in -filter.
+        # A single blank line keeps the custom-input row available.
+        payload = "\n"
+        try:
+            result = subprocess.run(
+                command,
+                input=payload.encode(),
+                stdout=subprocess.PIPE,
+                check=False,
+            )
+        except OSError as exc:
+            raise BooruError(f"cannot start rofi: {exc}") from exc
+        if result.returncode in (14, 15):
+            typed = result.stdout.decode("utf-8", "replace").rstrip("\r\n")
+            rofi_cooldown()
+            updated = None
+            if parser is not None:
+                updated = tag_suggestions(
+                    settings, parser, tag_prefix(typed), typed
+                )
+            text = updated if updated is not None else typed
+            notice = ""
+            continue
+        if result.returncode == 10:
+            rofi_cooldown()
+            return "filters", None
+        if result.returncode == 11:
+            rofi_cooldown()
+            return "provider", None
+        if result.returncode == 12:
+            rofi_cooldown()
+            return "quit", None
+        if result.returncode != 0:
+            rofi_cooldown()
+            return "cancel", None
+        tags = result.stdout.decode("utf-8", "replace").strip()
+        rofi_cooldown()
+        # Booru tags are lower-case; "Blue Sky" would otherwise silently match
+        # nothing on Danbooru and friends.
+        return "search", " ".join(tags.split()).lower()
+
+
+def provider_picker(settings: Settings, state: dict | None = None) -> bool:
+    """Quick Alt+P popup. Returns True when the provider changed."""
+    order = list(PROVIDERS)
+    current = PROVIDERS[settings.provider]["label"]
+    labels = [PROVIDERS[key]["label"] for key in order]
+    chosen = prompt_choice("Provider", labels, current)
+    if chosen:
+        for key in order:
+            if PROVIDERS[key]["label"] == chosen:
+                settings.provider = key
+                settings.per_page = min(
+                    settings.per_page, PROVIDERS[key]["max_limit"]
+                )
+                if state is not None:
+                    settings.tags = state.get("last_tags", {}).get(key, "")
+                return True
+    return False
+
+
+def settings_menu(
+    settings: Settings, parser: configparser.ConfigParser, state: dict
+) -> str | None:
+    """Filter-only menu. No Search, Tags, or Quit entries — those are handled
+    by the tag-search prompt."""
+    provider = PROVIDERS[settings.provider]
+    size = (
+        "any"
+        if not settings.min_width and not settings.min_height
+        else f"{settings.min_width}×{settings.min_height}"
+    )
+    enter_label = (
+        "apply as wallpaper"
+        if settings.on_enter == "apply"
+        else "save only"
+    )
+    entries = [
+        f"   Provider: {provider['label']}",
+        f"   Rating: {settings.rating}",
+        f"   Min score: {settings.min_score}",
+        f"   Min size: {size}",
+        f"   Orientation: {settings.orientation}",
+        f"   Sort: {settings.sort}",
+        f"   Per page: {settings.per_page}",
+        f"   Enter: {enter_label}",
+        "   Gelbooru credentials…",
+        "   Open downloads folder",
+    ]
+    picked = rofi_menu(
+        entries,
+        f"Anime Wall · {provider['label']} · filters",
+        width=820,
+        lines_visible=len(entries),
+    )
+    if picked is None:
+        return None
+    picked = picked.strip()
+
+    if picked.startswith("Provider:"):
+        order = list(PROVIDERS)
+        current = provider["label"]
+        labels = [PROVIDERS[key]["label"] for key in order]
+        chosen = prompt_choice("Provider", labels, current)
+        if chosen:
+            for key in order:
+                if PROVIDERS[key]["label"] == chosen:
+                    settings.provider = key
+                    settings.tags = state.get("last_tags", {}).get(key, "")
+                    settings.per_page = min(
+                        settings.per_page, PROVIDERS[key]["max_limit"]
+                    )
+    elif picked.startswith("Rating:"):
+        chosen = prompt_choice("Rating", list(RATING_CHOICES), settings.rating)
+        if chosen:
+            settings.rating = chosen
+    elif picked.startswith("Min score:"):
+        value = prompt_int("Minimum score", settings.min_score)
+        if value is not None:
+            settings.min_score = value
+    elif picked.startswith("Min size:"):
+        value = prompt_size(settings.min_width, settings.min_height)
+        if value is not None:
+            settings.min_width, settings.min_height = value
+    elif picked.startswith("Orientation:"):
+        chosen = prompt_choice(
+            "Orientation", list(ORIENTATION_CHOICES), settings.orientation
+        )
+        if chosen:
+            settings.orientation = chosen
+    elif picked.startswith("Sort:"):
+        chosen = prompt_choice("Sort", list(SORT_CHOICES), settings.sort)
+        if chosen:
+            settings.sort = chosen
+    elif picked.startswith("Per page:"):
+        choices = ["12", "24", "48", "100"]
+        chosen = prompt_choice("Results per page", choices, str(settings.per_page))
+        if chosen:
+            settings.per_page = int(chosen)
+    elif picked.startswith("Enter:"):
+        chosen = prompt_choice("Enter action", ["save", "apply"], settings.on_enter)
+        if chosen:
+            settings.on_enter = chosen
+    elif picked.startswith("Gelbooru credentials"):
+        if prompt_gelbooru(parser):
+            settings.provider = "gelbooru"
+    elif picked.startswith("Open downloads"):
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.run([opener, str(settings.download_dir)], check=False)
+    return "menu"
+
+
+def spawn_download(post: Post, settings: Settings, apply: bool) -> bool:
+    """Download in a detached worker so the rofi grid never blocks."""
+    payload = json.dumps(
+        {
+            "post": asdict(post),
+            "download_dir": str(settings.download_dir),
+            "apply": apply,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--download-one",
+                payload,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as exc:
+        rofi_error(f"Cannot start the download: {exc}")
+        return False
+    action = "Applying" if apply else "Saving"
+    notify("anime-wall", f"{action} #{post.id}…", 1600)
+    return True
+
+
+def download_one(payload: str) -> int:
+    """Worker entry point: save one post and optionally apply it."""
+    try:
+        data = json.loads(payload)
+        post = Post(**data["post"])
+        root = Path(data["download_dir"]).expanduser()
+        folder = provider_folder(root, post.provider)
+        target = download(post, folder)
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        notify("anime-wall", f"Download failed: {exc}", 6000)
+        return 1
+    except BooruError as exc:
+        notify("anime-wall", f"Could not download: {exc}", 6000)
+        return 1
+
+    if data.get("apply"):
+        applied = archive_wallpaper(target)
+        try:
+            apply_wallpaper(applied)
+        except BooruError as exc:
+            notify("anime-wall", f"Saved, but wallpaper was not applied: {exc}", 6000)
+            return 1
+        notify("Wallpaper applied", f"{post.provider} #{post.id}\n{applied}", 4000)
+    else:
+        tags = post.tags.split()[:4]
+        body = f"{post.provider} #{post.id} · {target.name}\n{target.parent}"
+        if tags:
+            body = f"{body}\n{' '.join(tags)}"
+        notify("Saved", body, 4000)
+    return 0
+
+
+def results_loop(
+    settings: Settings, parser: configparser.ConfigParser, state: dict
+) -> str:
+    """Show results for the current page.
+
+    Returns "menu" when the user wants to change filters, "next" when the
+    page counter should advance, and "quit" to leave the browser.
+    """
+    while True:
+        debug(f"fetch page={settings.page} tags={settings.tags!r}")
+        try:
+            posts = fetch_posts(settings, parser)
+        except BooruError as exc:
+            debug(f"fetch failed: {exc}")
+            rofi_error(str(exc))
+            state["notice"] = f"Search failed: {exc}"
+            return "menu"
+
+        if not posts and settings.page > 1:
+            # Going past the last page (or typing a page number far beyond the
+            # end) should return to the last page that actually had results,
+            # not walk back one empty page at a time.
+            fallback = max(1, min(settings.page - 1, int(
+                state.get("last_good_page") or 1
+            )))
+            notify(
+                "anime-wall",
+                f"No results on page {settings.page} — back to page {fallback}",
+                2600,
+            )
+            settings.page = fallback
+            continue
+
+        if not posts:
+            rofi_error(
+                "No results. Remove some tags, lower the score/size filter, "
+                "or choose another rating."
+            )
+            state["notice"] = (
+                f"No results for “{settings.tags or 'all'}” — "
+                "change tags or press Alt+F"
+            )
+            return "menu"
+
+        previews = fetch_previews(posts, settings.preview_workers)
+        state["last_good_page"] = settings.page
+        # Count the raw API page: local score/size filters may hide items, but
+        # the next page still exists when the server returned a full page.
+        has_next = cached_raw_count(settings) >= min(
+            settings.per_page, PROVIDERS[settings.provider]["max_limit"]
+        )
+        debug(f"page={settings.page} posts={len(posts)} has_next={has_next}")
+        saved_ids: set[int] = set()
+        selected_row = 0
+
+        while True:
+            page_suffix = f" · page {settings.page}" if settings.page > 1 else ""
+            prompt = (
+                f"{PROVIDERS[settings.provider]['label']} · "
+                f"{settings.tags or 'all'}{page_suffix}"
+            )
+            refresh_previews(posts, previews)
+            entries = build_entries(
+                posts, previews, settings.download_dir, saved_ids
+            )
+            action, index = run_grid(
+                entries,
+                prompt,
+                len(posts),
+                has_next,
+                settings.on_enter,
+                selected_row,
+                has_prev=settings.page > 1,
+            )
+            debug(f"grid action={action} index={index} page={settings.page}")
+            if action == "next":
+                settings.page += 1
+                return "next"
+            if action == "prev":
+                if settings.page > 1:
+                    settings.page -= 1
+                return "next"
+            if action == "page":
+                chosen = page_picker(settings)
+                debug(f"page picker chose={chosen} current={settings.page}")
+                if chosen is not None and chosen != settings.page:
+                    settings.page = chosen
+                    return "next"
+                continue
+            if action == "quit":
+                return "quit"
+            if action == "cancel" or index is None:
+                return "menu"
+
+            selected_row = index
+            post = posts[index]
+            if action == "save":
+                apply = False
+            elif action == "apply":
+                apply = True
+            else:
+                apply = settings.on_enter == "apply"
+            if spawn_download(post, settings, apply):
+                saved_ids.add(post.id)
+            time.sleep(0.25)  # prevent a double-click from hitting the new grid
+
+
+def settings_to_args(settings: Settings) -> list[str]:
+    return [
+        "--provider",
+        settings.provider,
+        "--tags",
+        settings.tags,
+        "--rating",
+        settings.rating,
+        "--min-score",
+        str(settings.min_score),
+        "--min-width",
+        str(settings.min_width),
+        "--min-height",
+        str(settings.min_height),
+        "--orientation",
+        settings.orientation,
+        "--sort",
+        settings.sort,
+        "--limit",
+        str(settings.per_page),
+        "--page",
+        str(settings.page),
+    ]
+
+
+def maybe_prefetch(
+    settings: Settings,
+    parser: configparser.ConfigParser,
+    config_file: Path | None = None,
+) -> None:
+    """Warm the API and thumbnail caches in a detached process.
+
+    The menu itself never waits for the network: by the time the user presses
+    Search, the results and most previews are usually already on disk.
+    """
+    key = api_cache_key(settings)
+    cached = read_api_cache(key)
+    if cached is not None and time.time() - cached[1] < 120:
+        return
+
+    marker = cache_dir() / "prefetch.json"
+    now = time.time()
+    try:
+        previous = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    if (
+        previous.get("key") == key
+        and isinstance(previous.get("ts"), (int, float))
+        and now - float(previous["ts"]) < 45
+    ):
+        return
+    try:
+        marker.write_text(json.dumps({"key": key, "ts": now}), encoding="utf-8")
+    except OSError:
+        pass
+
+    args = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--prefetch",
+    ]
+    if config_file is not None:
+        args += ["--config", str(config_file)]
+    args += settings_to_args(settings)
+    try:
+        subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        pass
+
+
+def ui(
+    settings: Settings,
+    parser: configparser.ConfigParser,
+    state: dict,
+    config_file: Path | None = None,
+) -> int:
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        raise BooruError("no graphical session (DISPLAY is not set)")
+
+    lock_path = cache_dir() / "ui.lock"
+    lock_handle = lock_path.open("w")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        notify("anime-wall", "Anime Wall is already open", 2000)
+        return 0
+
+    if not settings.tags:
+        settings.tags = state.get("last_tags", {}).get(settings.provider, "")
+
+    last_prefetch_key: str | None = None
+    notice = ""
+    while True:
+        action, tags = search_prompt(
+            settings.tags, settings, notice, parser
+        )
+        debug(f"search action={action} tags={tags!r}")
+        notice = ""
+        if action in ("quit", "cancel"):
+            return 0
+        if action == "filters":
+            while True:
+                act = settings_menu(settings, parser, state)
+                if act is None:
+                    break  # back to tag search
+                persist_settings(settings, parser)
+            state.pop("last_good_page", None)
+            continue
+        if action == "provider":
+            if provider_picker(settings, state):
+                persist_settings(settings, parser)
+                state.pop("last_good_page", None)
+            continue
+        # action == "search"
+        settings.tags = tags
+        settings.page = 1
+        state.pop("last_good_page", None)
+        settings.clamp()
+        state.setdefault("last_tags", {})[settings.provider] = settings.tags
+        state["last_provider"] = settings.provider
+        save_state(state)
+
+        key = api_cache_key(settings)
+        if key != last_prefetch_key:
+            maybe_prefetch(settings, parser, config_file)
+            last_prefetch_key = key
+
+        while True:
+            where = results_loop(settings, parser, state)
+            if where == "quit":
+                return 0
+            if where != "next":
+                break
+        notice = state.pop("notice", "")
+
+
+def prefetch_mode(settings: Settings, parser: configparser.ConfigParser) -> int:
+    """Background worker: fetch the current page and warm all thumbnails."""
+    try:
+        posts = fetch_posts(settings, parser, use_cache=False, quiet=True)
+    except BooruError:
+        return 1
+    if posts:
+        fetch_previews(
+            posts,
+            settings.preview_workers,
+            budget=30,
+            spawn=False,
+        )
+    return 0
+
+
+def prefetch_previews(payload: str) -> int:
+    """Background worker: fill missing thumbnails for a list of posts."""
+    try:
+        items = json.loads(payload)
+        posts = [Post(**item) for item in items]
+    except (ValueError, TypeError, KeyError):
+        return 1
+    if posts:
+        fetch_previews(posts, 16, budget=30, spawn=False)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="anime-wall",
+        description="Browse and download anime art from boorus.",
+    )
+    parser.add_argument("-p", "--provider", choices=sorted(PROVIDERS), help="booru to query")
+    parser.add_argument("-t", "--tags", help="space separated tags")
+    parser.add_argument("-r", "--rating", choices=RATING_CHOICES)
+    parser.add_argument("--min-score", type=int)
+    parser.add_argument("--min-width", type=int)
+    parser.add_argument("--min-height", type=int)
+    parser.add_argument("-o", "--orientation", choices=ORIENTATION_CHOICES)
+    parser.add_argument("-s", "--sort", choices=SORT_CHOICES)
+    parser.add_argument("-n", "--limit", type=int, help="results per page")
+    parser.add_argument("--page", type=int, default=1)
+    parser.add_argument("--download", type=int, metavar="N", help="download the first N results")
+    parser.add_argument("--download-dir", help="override the download folder")
+    parser.add_argument("--print", action="store_true", dest="print_json", help="print results as JSON")
+    parser.add_argument("--config", help="use an alternate config file")
+    parser.add_argument("--prefetch", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--prefetch-previews", metavar="JSON", help=argparse.SUPPRESS)
+    parser.add_argument("--download-one", metavar="JSON", help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    path = Path(args.config).expanduser() if args.config else config_path()
+    try:
+        parser = load_config(path)
+    except BooruError as exc:
+        print(f"anime-wall: {exc}", file=sys.stderr)
+        return 1
+
+    settings = Settings.from_config(parser)
+    if args.provider:
+        settings.provider = args.provider
+    if args.tags is not None:
+        settings.tags = " ".join(args.tags.split())
+    if args.rating:
+        settings.rating = args.rating
+    if args.min_score is not None:
+        settings.min_score = args.min_score
+    if args.min_width is not None:
+        settings.min_width = args.min_width
+    if args.min_height is not None:
+        settings.min_height = args.min_height
+    if args.orientation:
+        settings.orientation = args.orientation
+    if args.sort:
+        settings.sort = args.sort
+    if args.limit:
+        settings.per_page = args.limit
+    if args.page:
+        settings.page = args.page
+    if args.download_dir:
+        settings.download_dir = Path(args.download_dir).expanduser()
+    settings.clamp()
+
+    if args.download_one:
+        return download_one(args.download_one)
+    if args.prefetch_previews:
+        return prefetch_previews(args.prefetch_previews)
+    if args.prefetch:
+        return prefetch_mode(settings, parser)
+
+    if not (args.print_json or args.download is not None):
+        try:
+            return ui(settings, parser, load_state(), path)
+        except BooruError as exc:
+            print(f"anime-wall: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        posts = fetch_posts(settings, parser)
+    except BooruError as exc:
+        print(f"anime-wall: {exc}", file=sys.stderr)
+        return 1
+
+    if args.print_json:
+        payload = [
+            {
+                "provider": post.provider,
+                "id": post.id,
+                "page": post.page_url,
+                "file_url": post.file_url,
+                "preview_url": post.preview_url,
+                "width": post.width,
+                "height": post.height,
+                "score": post.score,
+                "rating": post.normalized_rating(),
+                "tags": post.tags,
+                "file_size": post.file_size,
+            }
+            for post in posts
+        ]
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    count = min(max(0, args.download or 0), len(posts))
+    if count == 0:
+        print("anime-wall: nothing matched", file=sys.stderr)
+        return 1
+    for post in posts[:count]:
+        try:
+            target = download(
+                post, provider_folder(settings.download_dir, post.provider)
+            )
+        except BooruError as exc:
+            print(f"anime-wall: {post.id}: {exc}", file=sys.stderr)
+            return 1
+        print(target)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:  # keep the UI from dying with an invisible traceback
+        print(f"anime-wall: {exc}", file=sys.stderr)
+        notify("anime-wall", f"Error: {exc}", 6000)
+        raise SystemExit(1)

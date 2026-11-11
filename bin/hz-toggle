@@ -1,0 +1,56 @@
+#!/bin/bash
+# Toggle the primary panel between the lowest and highest refresh rate of its
+# currently active mode. Serialised with refresh-auto (same xrandr.lock): both
+# programs read-then-write the display state, and rapid hotkey presses used to
+# race and leave an arbitrary rate behind.
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/xrandr.lock"
+flock -w 5 9 || exit 1
+
+OUT=$(xrandr --query 2>/dev/null | awk '/ primary/{print $1; exit}')
+[ -n "$OUT" ] || OUT=$(xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}')
+[ -n "$OUT" ] || exit 1
+
+read -r MODE CURRENT <<<"$(xrandr --query 2>/dev/null | awk -v out="$OUT" '
+    $1 == out { inside = 1; next }
+    inside && /^[^ \t]/ { exit }
+    inside && /\*/ {
+        for (i = 2; i <= NF; i++) {
+            if ($i ~ /\*/) {
+                v = $i
+                gsub(/[*+]/, "", v)
+                print $1, v
+                exit
+            }
+        }
+        exit
+    }
+')"
+[ -n "$MODE" ] || exit 1
+
+RATES=$(xrandr --query 2>/dev/null | awk -v out="$OUT" '
+    $1 == out { inside = 1; next }
+    inside && /^[^ \t]/ { exit }
+    inside && /\*/ {
+        for (i = 2; i <= NF; i++) {
+            v = $i
+            gsub(/[*+]/, "", v)
+            if (v ~ /^[0-9]+\.[0-9]+$/) print v
+        }
+        exit
+    }
+' | sort -n)
+
+LOW=$(printf '%s\n' "$RATES" | head -n1)
+HIGH=$(printf '%s\n' "$RATES" | tail -n1)
+[ -n "$LOW" ] && [ -n "$HIGH" ] && [ "$LOW" != "$HIGH" ] || exit 0
+
+if [ "$CURRENT" = "$HIGH" ]; then
+    TARGET=$LOW
+else
+    TARGET=$HIGH
+fi
+
+if xrandr --output "$OUT" --mode "$MODE" --rate "$TARGET" >/dev/null 2>&1; then
+    notify-send -u low -i display "Display" "Switched to $TARGET Hz"
+fi

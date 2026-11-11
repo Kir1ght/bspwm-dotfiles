@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# https://github.com/Raymo111/i3lock-color
+
+# Single instance: a second invocation would STOP sxhkd again and then the
+# first one's EXIT trap would CONT it while the screen is still locked.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/screen-lock.lock"
+flock -n 9 || exit 0
+
+fg=c0caf5
+wrong=db4b4b
+date=7aa2f7
+verify=7aa2f7
+
+# The current lock screen is an atomic symlink managed by select-wallpaper /
+# random_wallpaper. The explicit directory fallbacks keep the screen locked even
+# if the symlink is missing after an upgrade.
+lock_dir="$HOME/Images/Wallpaper_lockscreen"
+lock_link="$HOME/.current_lockscreen"
+lock_image=""
+
+if [ -L "$lock_link" ] || [ -e "$lock_link" ]; then
+    candidate=$(readlink -f -- "$lock_link" 2>/dev/null || true)
+    [ -n "$candidate" ] && [ -f "$candidate" ] && lock_image="$candidate"
+fi
+if [ -z "$lock_image" ] && [ -d "$lock_dir" ]; then
+    while IFS= read -r -d '' candidate; do
+        lock_image="$candidate"
+        break
+    done < <(find "$lock_dir" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        -print0 | sort -z)
+fi
+
+# sxhkd - глобальный хоткей-демон и не завязан на конкретное окно, поэтому его бинды
+# (например super+space) продолжают срабатывать поверх i3lock и меняют состояние
+# окна за экраном блокировки. Останавливаем sxhkd на время блокировки и гарантированно
+# возобновляем его после (даже если i3lock завершится аварийно), иначе экран
+# блокировки можно "свернуть" не вводя пароль.
+pkill -STOP sxhkd
+trap 'pkill -CONT sxhkd' EXIT
+
+lock_args=(
+    -n --force-clock -e --indicator --radius=20
+    --ring-width=40 --inside-color="$fg" --ring-color="$fg" --insidever-color="$verify"
+    --ringver-color="$verify" --insidewrong-color="$wrong" --ringwrong-color="$wrong"
+    --line-uses-inside --keyhl-color="$verify" --separator-color="$verify" --bshl-color="$verify"
+    --time-str="%H:%M" --time-size=140 --date-str="%a, %d %b" --date-size=45 --verif-text="Verifying Password..."
+    --wrong-text="Wrong Password!" --noinput-text="" --greeter-text="Type the password to Unlock" --ind-pos="650:760"
+    --time-font="Fira Code:style=Bold" --date-font="Fira Code" --verif-font="Fira Code" --greeter-font="Fira Code"
+    --wrong-font="Fira Code" --verif-size=23 --greeter-size=23 --wrong-size=23 --time-pos="650:540" --date-pos="650:600"
+    --greeter-pos="650:930" --wrong-pos="650:970" --verif-pos="650:805" --date-color="$date" --time-color="$date" --greeter-color="$fg"
+    --wrong-color="$wrong" --verif-color="$verify" --verif-pos="650:970" --pointer=default --refresh-rate=0 --pass-media-keys
+    --pass-volume-keys
+)
+if [ -n "$lock_image" ]; then
+    lock_args+=(--fill -i "$lock_image")
+else
+    lock_args+=(--color=131819)
+fi
+i3lock "${lock_args[@]}"
+

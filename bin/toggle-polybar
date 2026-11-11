@@ -1,0 +1,18 @@
+#!/bin/sh
+# Show/hide the bar. launch.sh derives top_padding from the real bar geometry,
+# so showing needs no hardcoded offset; hiding must clear it explicitly.
+if pgrep -x polybar >/dev/null
+then
+  pkill -x polybar
+  for _ in $(seq 1 50); do
+    pgrep -x polybar >/dev/null || break
+    sleep 0.1
+  done
+  pgrep -x polybar >/dev/null && pkill -9 -x polybar
+  for monitor in $(bspc query -M --names)
+  do
+    bspc config -m "$monitor" top_padding 0
+  done
+else
+  "$HOME/.config/polybar/launch.sh"
+fi

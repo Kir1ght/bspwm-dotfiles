@@ -1,0 +1,136 @@
+#!/bin/sh
+
+# Keep the NVIDIA dGPU asleep: use the AMD iGPU for VA-API/OpenCL and Firefox DRM
+export PATH="$HOME/.local/bin:$PATH"
+
+export LIBVA_DRIVER_NAME=radeonsi
+export MOZ_DRM_DEVICE=/dev/dri/renderD129
+export SAL_DISABLE_OPENCL=1
+
+if ! pgrep -x sxhkd > /dev/null; then
+    sxhkd &
+fi
+
+# Multiple monitor support
+sh $HOME/.config/bspwm/dual_monitors.sh
+
+# Palette generated from the current wallpaper (falls back to Dracula)
+[ -f "$HOME/.config/bspwm/colors.sh" ] && . "$HOME/.config/bspwm/colors.sh"
+
+# Window borders (Auto-Generate)
+bspc config focus_follows_pointer true
+bspc config focused_border_color "${FOCUSED_BORDER:-#bd93f9}"
+bspc config normal_border_color "${NORMAL_BORDER:-#44475a}"
+bspc config border_width 2
+bspc config borderless_monocle true
+
+bspc config active_border_color "${ACTIVE_BORDER:-#ff79c6}"
+bspc config presel_feedback_color "${PRESEL_FEEDBACK:-#6272a4}"
+
+# fix pointer
+xsetroot -cursor_name left_ptr
+
+# gaps
+bspc config gapless_monocle false
+bspc config window_gap 8
+
+# moving floating windows and resize them with mouse, hold alt key
+bspc config pointer_modifier mod4
+bspc config pointer_action1 move
+bspc config pointer_action2 resize_side
+bspc config pointer_action3 resize_corner
+
+# rules
+bspc rule -a feh state=floating
+
+# start resources
+xrdb merge ~/.Xresources
+
+# Keyboard layout: configure here too, because ly starts bspwm directly and
+# never runs ~/.xinitrc. bspwmrc also runs on every reload, and calling
+# setxkbmap again would switch the user back to the first layout. The X root
+# property marks "already configured for this X session"; it disappears when X
+# restarts, so the next login configures the layout again.
+if command -v setxkbmap >/dev/null 2>&1; then
+    if ! xprop -root _KIRI_KBD_LAYOUT 2>/dev/null | grep -q '_KIRI_KBD_LAYOUT(STRING)'; then
+        if setxkbmap -layout us,ru -option grp:alt_shift_toggle; then
+            xprop -root -f _KIRI_KBD_LAYOUT 8s -set _KIRI_KBD_LAYOUT "us,ru" 2>/dev/null || true
+        fi
+    fi
+fi
+
+# Language change notifications (listens to XKB group changes)
+# OFF: commented out — uncomment to re-enable (requires xkb-switch)
+#pgrep -f lang-notify.sh > /dev/null || ~/bin/lang-notify.sh &
+
+# Wallpaper: restore the last image. Run it through sh so an old ~/.fehbg
+# without the execute bit still works. ~/.current_wallpaper is the stable
+# symlink to the source image; it is the fallback if ~/.fehbg is missing.
+# A fresh install has no ~/.fehbg yet, so it starts with the bundled default.
+DESKTOP_WALL_DIR="$HOME/Images/Wallpaper_desktop"
+DEFAULT_WALL="$DESKTOP_WALL_DIR/default.png"
+if [ ! -f "$DEFAULT_WALL" ]; then
+    DEFAULT_WALL=$(find "$DESKTOP_WALL_DIR" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        2>/dev/null | sort | head -n1)
+fi
+if [ -f "$HOME/.fehbg" ]; then
+    sh "$HOME/.fehbg" 2>/dev/null || feh --bg-fill "$DEFAULT_WALL"
+elif [ -L "$HOME/.current_wallpaper" ] && [ -f "$HOME/.current_wallpaper" ]; then
+    feh --no-fehbg --bg-fill "$HOME/.current_wallpaper"
+else
+    feh --bg-fill "$DEFAULT_WALL"
+fi
+
+# Rebuild the palette from the current wallpaper: polybar, alacritty,
+# dunst, rofi, zathura, GTK and bspwm borders.
+"$HOME/.config/theme/apply.py" --quiet --no-reload --debounce 0
+
+
+# Panel refresh rate: 60 Hz on battery, highest on AC. Event-driven through
+# UPower, so nothing polls the hardware every few seconds.
+"$HOME/bin/refresh-auto" --monitor &
+
+# Run polybar
+~/.config/polybar/launch.sh
+
+# launch notification daemon (once; bspwmrc also runs on reload)
+if ! pgrep -x dunst >/dev/null; then
+    dunst -config "$HOME/.config/bspwm/dunstrc" &
+fi
+
+# launch battery tracker and redshift
+pkill battery-alert; ~/bin/battery-alert &
+pgrep -x redshift > /dev/null || redshift &
+
+# start compositor
+pgrep -x picom > /dev/null || picom --config $HOME/.config/bspwm/picom_configurations/1.conf &
+
+# == autostart ==
+if command -v ksnip >/dev/null 2>&1; then
+    pkill -x ksnip 2>/dev/null || true
+    ksnip &
+fi
+if command -v throne >/dev/null 2>&1; then
+    pkill -x throne 2>/dev/null || true
+    throne &
+fi
+
+# launch clipboard manager daemon
+pkill greenclip; "$HOME/.local/bin/greenclip" daemon &
+
+# выключать тачпад, пока подключена любая мышь
+setsid -f ~/.local/bin/touchpad-when-mouse.sh >/dev/null 2>&1
+
+# Run the cursor tracker detached: it loops forever and must not block bspwmrc.
+pkill -f "$HOME/bin/cursor_tracker.sh" 2>/dev/null || true
+setsid -f "$HOME/bin/cursor_tracker.sh" >/dev/null 2>&1
+
+# Swappy
+bspc rule -a Swappy state=floating centered=on
+
+# window rule
+# bspc config focus_follows_pointer false
+
+# fixer
+# bspc config pointer_follows_focus false

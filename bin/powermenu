@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+# Do not let a double press open two menus / run two actions.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/powermenu.lock"
+flock -n 9 || exit 0
+
+choice=$(printf "Lock\nLogout\nSuspend\nReboot\nShutdown" | rofi -m -1 -dmenu)
+case "$choice" in
+  Lock) sh $HOME/bin/screen-lock ;;
+  Logout) pkill -KILL -u "$USER" ;;
+  Suspend) systemctl suspend && sh $HOME/bin/screen-lock ;;
+  Reboot) systemctl reboot ;;
+  Shutdown) systemctl poweroff ;;
+esac

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+# Graphics card (no fork: the glob is expanded by the shell)
+CARD=
+for dev in /sys/class/backlight/*; do
+	if [[ -e "$dev/brightness" ]]; then
+		CARD=${dev##*/}
+		break
+	fi
+done
+[[ -n "$CARD" ]] || exit 1
+
+# Serialise changes: `light -A/-U` is a read-modify-write, and Polybar starts
+# every scroll action detached, so simultaneous notches would read the same
+# base value and silently drop steps (measured: 4 parallel = +5 instead of +20).
+lock() {
+	exec 9>"${XDG_RUNTIME_DIR:-/tmp}/brightness.lock"
+	flock -w 2 9 || exit 1
+}
+
+# Print current brightness as a percentage
+get_backlight() {
+	if [[ "$CARD" == *"intel_"* ]]; then
+		brightnessctl --device "$CARD" -m | awk -F, '{print $4}'
+	else
+		light -G | awk '{printf "%.0f%%\n", $1}'
+	fi
+}
+
+# Increase brightness
+inc_backlight() {
+	if [[ "$CARD" == *"intel_"* ]]; then
+		brightnessctl --device "$CARD" set +5%
+	else
+		light -A 5
+	fi
+}
+
+# Decrease brightness
+dec_backlight() {
+	if [[ "$CARD" == *"intel_"* ]]; then
+		brightnessctl --device "$CARD" set 5%-
+	else
+		light -U 5
+	fi
+}
+
+# Execute accordingly
+if [[ "$1" == "--get" ]]; then
+	get_backlight
+elif [[ "$1" == "--up" ]]; then
+	lock
+	inc_backlight
+elif [[ "$1" == "--down" ]]; then
+	lock
+	dec_backlight
+else
+	get_backlight
+fi

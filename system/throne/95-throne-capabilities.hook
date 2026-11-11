@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = throne-bin
+
+[Action]
+Description = Granting CAP_NET_ADMIN and CAP_NET_RAW to ThroneCore...
+When = PostTransaction
+Exec = /usr/sbin/setcap cap_net_admin,cap_net_raw+ep /opt/Throne/ThroneCore

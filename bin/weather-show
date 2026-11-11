@@ -1,0 +1,11 @@
+#!/bin/sh
+# Open the full wttr.in forecast in a terminal.
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/weather-city"
+city=""
+[ -f "$CONF" ] && city=$(sed -n '1p' "$CONF")
+city=$(printf '%s' "$city" | tr ' ' '+')
+if [ -n "$city" ]; then
+    exec alacritty --hold -e sh -c "curl -s 'https://wttr.in/${city}?0'"
+else
+    exec alacritty --hold -e sh -c "curl -s 'https://wttr.in/?0'"
+fi

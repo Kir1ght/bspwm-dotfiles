@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""Wallpaper picker: a rofi grid with real thumbnails.
+
+The picker has two independent libraries:
+
+    ~/Images/Wallpaper_desktop      desktop wallpapers
+    ~/Images/Wallpaper_lockscreen   lock screen wallpapers
+
+Enter applies the selected image. Alt+V opens a full-screen preview, Alt+L
+switches between the desktop and lock screen libraries, Esc cancels. Desktop
+wallpapers are applied through random_wallpaper (single-worker lock and palette
+rebuild included); lock screen changes only update ~/.current_lockscreen.
+
+Desktop mode scans only Wallpaper_desktop. Lock screen mode lists
+Wallpaper_lockscreen first, then the desktop library as candidates; choosing a
+desktop image copies it into Wallpaper_lockscreen and applies it there.
+
+Usage:
+    select-wallpaper                pick a desktop wallpaper
+    select-wallpaper --lockscreen   pick a lock screen wallpaper
+    select-wallpaper --print        print the selected path instead of applying
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import fcntl
+import hashlib
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGES_ROOT = Path.home() / "Images"
+LIBRARY_DIRS = {
+    "desktop": IMAGES_ROOT / "Wallpaper_desktop",
+    "lockscreen": IMAGES_ROOT / "Wallpaper_lockscreen",
+}
+CURRENT_LINKS = {
+    "desktop": Path.home() / ".current_wallpaper",
+    "lockscreen": Path.home() / ".current_lockscreen",
+}
+MODE_TITLES = {"desktop": "Wallpapers", "lockscreen": "Lock screen"}
+CACHE_ROOT = Path(
+    os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+) / "select-wallpaper"
+THUMB_DIR = CACHE_ROOT / "thumbs"
+
+# Layout metrics mirrored by the rofi theme below.
+ELEMENT_PAD = 8
+CELL_GAP = 14
+# Rofi adds a text line and hidden pixels below every icon; 64px matches the
+# measured row overhead in the Anime Wall grid (see GRID_ROW_EXTRA there).
+ROW_EXTRA = 64
+CHROME = 126
+ICON_CAP = 380
+ICON_MIN = 170
+THUMB_SIZE = 480
+
+GRID_THEME = f"""
+window {{
+    width: 1600px;
+    height: 1100px;
+    border: 2px;
+    border-color: @border-col;
+    border-radius: 10px;
+    background-color: @bg-col;
+    padding: 0;
+}}
+mainbox {{
+    background-color: @bg-col;
+    padding: 12px;
+}}
+inputbar {{
+    background-color: @bg-col;
+    padding: 8px;
+    margin: 0 0 10px 0;
+}}
+prompt {{
+    background-color: @blue;
+    text-color: @bg-col;
+    padding: 5px 10px;
+    border-radius: 4px;
+}}
+entry {{
+    text-color: @fg-col;
+    padding: 5px 10px;
+}}
+listview {{
+    columns: 4;
+    lines: 3;
+    spacing: {CELL_GAP}px;
+    padding: 4px;
+    margin: 0;
+    background-color: @bg-col;
+    scrollbar: false;
+    fixed-columns: true;
+    dynamic: false;
+}}
+element {{
+    orientation: vertical;
+    padding: {ELEMENT_PAD}px;
+    spacing: 4px;
+    border-radius: 8px;
+    background-color: @bg-col-light;
+    text-color: @fg-col;
+}}
+element selected {{
+    background-color: @selected-col;
+    text-color: @fg-col2;
+    border: 2px;
+    border-color: @blue;
+}}
+element-icon {{
+    size: 260px;
+    border-radius: 6px;
+}}
+element-text {{
+    horizontal-align: 0.5;
+    vertical-align: 0.5;
+    text-color: @fg-col;
+}}
+message {{
+    background-color: @bg-col;
+    text-color: @grey;
+    padding: 4px 8px;
+}}
+textbox {{
+    background-color: @bg-col;
+    text-color: @grey;
+}}
+"""
+
+
+def notify(title: str, body: str, timeout: int = 2500) -> None:
+    sender = shutil.which("notify-send")
+    if not sender:
+        return
+    try:
+        subprocess.run(
+            [sender, "-a", "select-wallpaper", "-t", str(timeout), title, body],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def find_images(
+    root: Path,
+    extra: Path | None = None,
+) -> tuple[list[Path], dict[Path, str]]:
+    """Return library images, then optional images from a second source.
+
+    Lock screen mode passes the desktop library as ``extra``. Choosing one of
+    those copies it into the lock screen library via random_wallpaper, so the
+    lock screen keeps its own file instead of depending on the desktop one.
+    """
+    images: list[Path] = []
+    labels: dict[Path, str] = {}
+    seen: set[str] = set()
+
+    def add(path: Path, label: str) -> None:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        images.append(path)
+        labels[path] = label
+
+    if root.is_dir():
+        for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+                add(path, path.name)
+
+    if extra and extra.is_dir():
+        prefix = "desktop"
+        for path in sorted(extra.iterdir(), key=lambda item: item.name.lower()):
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+                add(path, f"{prefix}/{path.name}")
+
+    return images, labels
+
+
+def link_target(link: Path) -> str | None:
+    try:
+        if link.is_symlink() or link.exists():
+            resolved = link.resolve()
+            if resolved.is_file():
+                return str(resolved)
+    except OSError:
+        pass
+    return None
+
+
+def current_wallpaper(mode: str) -> str | None:
+    """Current image from the managed symlink, with a ~/.fehbg fallback."""
+    target = link_target(CURRENT_LINKS[mode])
+    if target:
+        return target
+    if mode != "desktop":
+        return None
+    try:
+        text = (Path.home() / ".fehbg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r'feh\b.*--bg-fill\s+"([^"]+)"', text)
+    if not match:
+        match = re.search(r"feh\b.*--bg-fill\s+(\S+)", text)
+    return match.group(1) if match else None
+
+
+def is_current(image: Path, current: str | None) -> bool:
+    if not current:
+        return False
+    try:
+        if Path(current).resolve() == image.resolve():
+            return True
+    except OSError:
+        pass
+    # Older versions only wrote ~/.fehbg, which points at a screen-sized cache
+    # copy named "<stem>-<hash>-WxH.jpg" in ~/.cache/theme/wallpapers.
+    if ".cache/theme/wallpapers" in current:
+        return Path(current).name.startswith(image.stem + "-")
+    return False
+
+
+def thumbnail_path(src: Path) -> Path | None:
+    try:
+        stat = src.stat()
+    except OSError:
+        return None
+    key = hashlib.sha1(
+        f"{src}\0{stat.st_mtime_ns}\0{stat.st_size}".encode()
+    ).hexdigest()[:20]
+    return THUMB_DIR / f"{key}.jpg"
+
+
+def build_thumbnail(src: Path, target: Path) -> None:
+    tool = shutil.which("magick") or shutil.which("convert")
+    if not tool:
+        return
+    tmp = target.with_suffix(f".{os.getpid()}.tmp.jpg")
+    command = [
+        tool,
+        f"{src}[0]",
+        "-auto-orient",
+        "-thumbnail",
+        f"{THUMB_SIZE}x{THUMB_SIZE}>",
+        "-background",
+        "#131819",
+        "-alpha",
+        "remove",
+        "-alpha",
+        "off",
+        "-quality",
+        "82",
+        str(tmp),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        if result.returncode == 0 and tmp.is_file():
+            tmp.replace(target)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def build_thumbnails(images: list[Path]) -> dict[Path, Path | None]:
+    """Render missing previews in parallel; never blocks on one broken file."""
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    pairs: list[tuple[Path, Path]] = []
+    ready: dict[Path, Path | None] = {}
+    for image in images:
+        target = thumbnail_path(image)
+        if target is None:
+            continue
+        if target.is_file():
+            ready[image] = target
+        else:
+            pairs.append((image, target))
+    if pairs:
+        workers = min(8, max(2, (os.cpu_count() or 4)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda pair: build_thumbnail(*pair), pairs))
+        for image, target in pairs:
+            ready[image] = target if target.is_file() else None
+    return ready
+
+
+def screen_size() -> tuple[int, int]:
+    try:
+        output = subprocess.run(
+            ["xrandr", "--current"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        ).stdout
+        for line in output.splitlines():
+            if "*" not in line:
+                continue
+            match = re.search(r"(\d+)x(\d+)\+", line)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        output = subprocess.run(
+            ["xdpyinfo"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        output = ""
+    match = re.search(r"dimensions:\s+(\d+)x(\d+)", output)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return 1920, 1080
+
+
+def grid_layout(count: int, screen: tuple[int, int]) -> tuple[int, int, int, int, int]:
+    """Return (width, height, columns, lines, icon) for the thumbnail grid."""
+    screen_w, screen_h = screen
+    max_w = max(600, screen_w - 120)
+    max_h = max(420, screen_h - 80)
+    columns = min(6, max(3, round(screen_w / 384)))
+    columns = min(columns, max(1, count))
+    rows = min(3, max(1, math.ceil(count / columns)))
+    icon_by_width = (max_w - 24) / columns - (2 * ELEMENT_PAD + CELL_GAP)
+    icon_by_height = (max_h - CHROME - 12) / rows - ROW_EXTRA
+    icon = int(max(ICON_MIN, min(ICON_CAP, icon_by_width, icon_by_height)))
+    cell_w = icon + 2 * ELEMENT_PAD
+    width = min(max_w, columns * cell_w + CELL_GAP * (columns - 1) + 24)
+    height = min(max_h, CHROME + rows * (icon + ROW_EXTRA) + 6)
+    return width, height, columns, rows, icon
+
+
+def rofi_binary() -> str | None:
+    return shutil.which("rofi")
+
+
+def build_payload(
+    images: list[Path],
+    labels: dict[Path, str],
+    thumbs: dict[Path, Path | None],
+    current: str | None,
+) -> bytes:
+    chunks: list[bytes] = []
+    for image in images:
+        label = labels.get(image, image.name)
+        if is_current(image, current):
+            label = "● " + label
+        line = label.encode("utf-8", "replace")
+        thumb = thumbs.get(image)
+        if thumb:
+            line += b"\0icon\x1f" + str(thumb).encode()
+        chunks.append(line + b"\n")
+    return b"".join(chunks)
+
+
+def wallpaper_command() -> list[str] | None:
+    for candidate in (
+        Path.home() / "bin" / "random_wallpaper",
+        Path.home() / ".local" / "bin" / "random_wallpaper",
+    ):
+        if os.access(candidate, os.X_OK):
+            return [str(candidate)]
+    found = shutil.which("random_wallpaper")
+    return [found] if found else None
+
+
+def preview(path: Path) -> None:
+    """Open a full-screen viewer, then return to the picker."""
+    for command in (
+        ["feh", "--fullscreen", "--auto-zoom", str(path)],
+        ["nsxiv", str(path)],
+        ["xdg-open", str(path)],
+    ):
+        tool = shutil.which(command[0])
+        if not tool:
+            continue
+        try:
+            subprocess.run([tool] + command[1:], check=False)
+        except OSError:
+            continue
+        return
+
+
+def pick(
+    mode: str,
+    images: list[Path],
+    labels: dict[Path, str],
+    thumbs: dict[Path, Path | None],
+    current: str | None,
+    selected_row: int | None,
+) -> tuple[str, int | None]:
+    """Run the rofi grid. Returns (action, index) with action apply/preview/switch."""
+    rofi = rofi_binary()
+    if not rofi:
+        notify("Wallpaper picker", "rofi is not installed", 5000)
+        return "", None
+    payload = build_payload(images, labels, thumbs, current)
+    width, height, columns, lines, icon = grid_layout(len(images), screen_size())
+    theme = (
+        GRID_THEME.replace("width: 1600px;", f"width: {width}px;")
+        .replace("height: 1100px;", f"height: {height}px;")
+        .replace("columns: 4;", f"columns: {columns};")
+        .replace("lines: 3;", f"lines: {lines};")
+        .replace("size: 260px;", f"size: {icon}px;")
+    )
+    other = "lockscreen" if mode == "desktop" else "desktop"
+    message = (
+        f"Enter — apply    Alt+V — preview    "
+        f"Alt+L — switch to {other}    Esc — cancel"
+    )
+    command = [
+        rofi,
+        "-dmenu",
+        "-i",
+        "-no-history",
+        "-no-custom",
+        "-auto-select",
+        "-show-icons",
+        "-format",
+        "s",
+        "-p",
+        MODE_TITLES[mode],
+        "-mesg",
+        message,
+        "-kb-custom-1",
+        "Alt+v",
+        "-kb-custom-2",
+        "Alt+l",
+        "-theme-str",
+        theme,
+    ]
+    # Only restore the cursor after a preview. Passing -selected-row on a fresh
+    # open makes rofi keep that row number while filtering, so typing a file name
+    # could silently apply the last match instead of the one under the cursor.
+    if selected_row is not None:
+        command += ["-selected-row", str(selected_row)]
+    try:
+        result = subprocess.run(
+            command,
+            input=payload,
+            stdout=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        notify("Wallpaper picker", f"cannot start rofi: {exc}", 5000)
+        return "", None
+    raw = result.stdout.decode("utf-8", "replace").strip()
+    index = None
+    if raw:
+        for candidate, image in enumerate(images):
+            label = labels.get(image, image.name)
+            if is_current(image, current):
+                label = "● " + label
+            if raw == label:
+                index = candidate
+                break
+    if result.returncode == 0 and index is not None:
+        return "apply", index
+    if result.returncode == 10:
+        return "preview", index
+    if result.returncode == 11:
+        return "switch", None
+    return "", None
+
+
+def no_images_message(mode: str) -> str:
+    if mode == "lockscreen":
+        return (
+            f"No images in {LIBRARY_DIRS['lockscreen']} "
+            f"or {LIBRARY_DIRS['desktop']}"
+        )
+    return f"No images in {LIBRARY_DIRS[mode]}"
+
+
+def load_mode(
+    mode: str,
+) -> tuple[Path, list[Path], dict[Path, str], dict[Path, Path | None], str | None]:
+    root = LIBRARY_DIRS[mode]
+    extra = LIBRARY_DIRS["desktop"] if mode == "lockscreen" else None
+    images, labels = find_images(root, extra)
+    return root, images, labels, build_thumbnails(images), current_wallpaper(mode)
+
+
+def main(argv: list[str]) -> int:
+    print_only = "--print" in argv[1:]
+    mode = "lockscreen" if any(
+        arg in {"--lockscreen", "--lock"} for arg in argv[1:]
+    ) else "desktop"
+
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "select-wallpaper.lock"
+    lock_handle = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0  # another picker is already open
+
+    root, images, labels, thumbs, current = load_mode(mode)
+    if not images:
+        notify(
+            "Wallpaper picker",
+            no_images_message(mode),
+            5000,
+        )
+        return 0
+
+    selected: int | None = None
+    while True:
+        action, index = pick(mode, images, labels, thumbs, current, selected)
+        if action == "switch":
+            mode = "lockscreen" if mode == "desktop" else "desktop"
+            root, images, labels, thumbs, current = load_mode(mode)
+            selected = None
+            if not images:
+                notify(
+                    "Wallpaper picker",
+                    no_images_message(mode),
+                    5000,
+                )
+                return 0
+            continue
+        if not action or index is None:
+            return 0
+        selected = index
+        image = images[index]
+        if action == "preview":
+            preview(image)
+            continue
+        if print_only:
+            print(image)
+            return 0
+        command = wallpaper_command()
+        if not command:
+            notify("Wallpaper picker", "random_wallpaper is not installed", 5000)
+            return 1
+        arguments = command + ["--set", str(image)]
+        if mode == "lockscreen":
+            arguments.append("--lockscreen")
+        result = subprocess.run(arguments, check=False)
+        if result.returncode == 0:
+            title = "Lock screen" if mode == "lockscreen" else "Wallpaper"
+            notify(title, f"Applied: {image.name}", 1500)
+            return 0
+        notify("Wallpaper picker", f"Could not apply {image.name}", 5000)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

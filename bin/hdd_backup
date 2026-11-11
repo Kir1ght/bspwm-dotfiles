@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Цветовые переменные
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color (сброс цвета)
+
+# Path to the external hard drive (without trailing slash)
+# TODO: change this path to your own backup drive
+DEST="/run/media/$USER/aaa"
+
+# ПРОВЕРКА: смонтирован ли диск?
+if [ ! -d "$DEST" ]; then
+    echo -e "${RED}ОШИБКА: Диск не найден в $DEST. Бэкап отменен.${NC}"
+    exit 1
+fi
+
+echo -e "${BLUE}=== Начинаю бэкап на $DEST ===${NC}"
+
+# Команды rsync
+echo "Синхронизация Knowledge..."
+rsync -av --delete "$HOME/Downloads/Knowledge/" "$DEST/Knowledge/"
+
+echo "Синхронизация SYNC..."
+rsync -av --delete "$HOME/Downloads/SYNC/" "$DEST/SYNC/"
+
+# Запись даты
+echo "last update: $(date +'%Y-%m-%d %H:%M:%S')" >> "$DEST/update.txt"
+
+echo -e "${GREEN}✔ Готово! Данные успешно синхронизированы.${NC}"

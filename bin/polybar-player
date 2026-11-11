@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Now-playing for Polybar: MPRIS (playerctl) first, then MPD (mpc).
+#
+# Every external call is bounded by `timeout`, so a player that disappears in
+# the middle of a D-Bus call cannot leave this script hanging and freeze the
+# last track on the bar. The script always prints exactly one line (possibly
+# empty) and exits 0: Polybar hides a custom/script module only when the
+# output is empty AND the exit status is 0.
+
+set -euo pipefail
+
+readonly LIMIT=1
+
+line=$(timeout "$LIMIT" playerctl metadata --format \
+    $'{{status}}\t{{artist}}\t{{title}}' 2>/dev/null || true)
+IFS=$'\t' read -r status artist title <<< "$line"
+
+if [[ "$status" == "Playing" || "$status" == "Paused" ]]; then
+    icon='󰐊'
+    [[ "$status" == "Paused" ]] && icon='󰏤'
+    if [[ -n "$artist" && -n "$title" ]]; then
+        printf '%s %s\n' "$icon" "${artist} - ${title:0:40}"
+    elif [[ -n "$title$artist" ]]; then
+        printf '%s %s\n' "$icon" "${title:-$artist}"
+    else
+        printf '\n'
+    fi
+    exit 0
+fi
+
+if command -v mpc >/dev/null 2>&1; then
+    current=$(timeout "$LIMIT" mpc current 2>/dev/null || true)
+    if [[ -n "$current" ]]; then
+        icon='󰐊'
+        if timeout "$LIMIT" mpc status 2>/dev/null | sed -n '2p' | grep -q '\[paused\]'; then
+            icon='󰏤'
+        fi
+        printf '%s %s\n' "$icon" "${current:0:40}"
+        exit 0
+    fi
+fi
+
+# No MPRIS client and no MPD track: clear the module instead of keeping
+# phantom data from the previous run.
+printf '\n'
+exit 0

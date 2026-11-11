@@ -1,0 +1,11 @@
+arttime-git 2.5.0-14
+bluetuith 1:0.2.7-1
+hyx 2026.01.11-1
+light 1.2.2-5
+opencode-beta 2.1.2-1
+ptpython 3.0.32-2
+rofi-bluetooth-git r41.0cca4d4-1
+throne-bin 1.3.2-1
+ttf-ms-fonts 2.0-12
+ttf-symbola 14.00-2
+upscayl-bin 2.15.0-10

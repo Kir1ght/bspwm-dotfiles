@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Installer logs
+build_debug.log
+*.log
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local state that must never be committed
+config/mpd/db
+config/mpd/state
+config/mpd/pid
+config/mpd/log
+config/fish/fish_variables.local

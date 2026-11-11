@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Anime Wall
+GenericName=Anime Art Browser
+Comment=Browse and download anime art from Yande.re, Konachan, Danbooru and Gelbooru
+Exec=sh -c "$HOME/bin/anime-wall"
+Icon=applications-multimedia
+Terminal=false
+Categories=Graphics;Network;Utility;
+Keywords=anime;wallpaper;booru;art;yandere;konachan;danbooru;gelbooru;
+StartupNotify=false

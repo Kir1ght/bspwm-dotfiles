@@ -1,0 +1,245 @@
+# =============================================================================
+# 1. CORE BSPWM & SESSION MANAGEMENT
+# =============================================================================
+
+# Close focused window (Q = Quit window)
+super + q
+    bspc node -c
+
+# Reload sxhkd configuration
+super + shift + r
+    pkill -USR1 -x sxhkd; notify-send 'sxhkd' 'Reloaded config' -t 1500
+
+# Power / Exit menu (Shutdown, reboot, logout)
+super + shift + q
+    ~/bin/powermenu
+
+# Lock screen
+ctrl + shift + l
+    ~/bin/screen-lock
+
+# Turn the display off after a short delay (wake with any key/mouse)
+super + s
+    sleep 2 && xset dpms force off
+
+# Quit / restart bspwm
+ctrl + shift + {q,r}
+    bspc {quit,wm -r}
+
+# =============================================================================
+# 2. APPLICATION LAUNCHERS
+# =============================================================================
+
+# Launch Terminal (Strictly Super+T)
+super + t
+    alacritty
+
+# Launch Browser (W = Web / Firefox)
+super + w
+    firefox
+
+super + shift + w
+    firefox --private-window
+
+# Launch File Manager (E = Explorer / Thunar)
+super + e
+    thunar
+
+# Toggle Polybar (B = Bar)
+super + b
+    ~/bin/toggle-polybar
+
+# Open terminal calendar (Calcurse)
+ctrl + shift + k
+    alacritty -e calcurse
+
+# Application launcher
+super + space
+    rofi -m -1 -show drun
+
+# Clipboard manager
+super + v
+    ~/bin/clipboard-menu
+
+# =============================================================================
+# 3. SECONDARY UTILITIES & TOOLS
+# =============================================================================
+
+# Telegram messenger
+super + shift + t
+    Telegram
+
+# Display refresh rate switcher (R = Refresh rate)
+super + alt + r
+    ~/bin/hz-toggle
+
+# Emoji picker menu
+super + shift + e
+    rofi -modi emoji -m -1 -show emoji
+
+# Color picker
+super + shift + x
+    ~/bin/xcolor-pick
+
+# Hotkey cheatsheet (generated from this file)
+super + question
+    ~/bin/keybindings
+
+# Update the system
+super + shift + u
+    ~/bin/system-update
+
+# Set random wallpaper
+ctrl + shift + t
+    ~/bin/random_wallpaper
+
+# Interactive wallpaper selector
+ctrl + alt + t
+    ~/bin/select-wallpaper
+
+# Interactive lock screen wallpaper selector
+ctrl + alt + l
+    ~/bin/select-wallpaper --lockscreen
+
+# Browse and download anime art from boorus (Yande.re, Konachan, Danbooru, Gelbooru)
+ctrl + alt + a
+    ~/bin/anime-wall
+
+# Rebuild the palette from the current wallpaper
+ctrl + alt + r
+    ~/.config/theme/apply.py --quiet
+
+# Screenshots (Selection / Fullscreen)
+{Print,super + shift + s}
+    maim -s | swappy -f -
+
+super + ctrl + s
+    maim | swappy -f -
+
+# Whisper: Quick voice typing into active window
+super + d
+    ~/bin/whisper-type
+
+# Whisper: Long session listener (Transcribes to ~/Audio/Recordings)
+super + shift + d
+    ~/bin/whisper-listen
+
+# =============================================================================
+# 4. HARDWARE, AUDIO & MEDIA (ALL AUDIO CLUSTERED ON 'A')
+# =============================================================================
+
+# Bluetooth management menu (Rofi)
+super + ctrl + b
+    rofi-bluetooth
+
+# Hardware volume keys
+XF86Audio{RaiseVolume,LowerVolume,Mute}
+    ~/bin/volume {--up,--down,--toggle}
+
+# Hardware brightness keys
+XF86MonBrightness{Up,Down}
+    ~/bin/brightness {--up,--down}
+
+# Toggle audio mute and notify
+super + shift + a
+    pactl set-sink-mute @DEFAULT_SINK@ toggle; \
+    if pactl get-sink-mute @DEFAULT_SINK@ | grep -q "yes"; then \
+        notify-send -a "Audio" -i audio-volume-muted "Audio" "MUTED" -t 1500; \
+    else \
+        notify-send -a "Audio" -i audio-volume-high "Audio" "UNMUTED" -t 1500; \
+    fi
+
+# Toggle microphone mute and notify
+super + shift + m
+    pactl set-source-mute @DEFAULT_SOURCE@ toggle; \
+    if pactl get-source-mute @DEFAULT_SOURCE@ | grep -q "yes"; then \
+        notify-send -a "Microphone" -i microphone-sensitivity-muted "Microphone" "MUTED" -t 1500; \
+    else \
+        notify-send -a "Microphone" -i microphone-sensitivity-high "Microphone" "UNMUTED" -t 1500; \
+    fi
+
+# Quick audio output selector (Ctrl + A)
+super + ctrl + a
+    ~/bin/audio-select
+
+# Quick microphone input selector (Ctrl + M)
+super + ctrl + m
+    ~/bin/mic-select
+
+# Graphical audio mixer (Ctrl + Shift + A)
+ctrl + shift + a
+    pavucontrol
+
+# Media playback: Play-Pause (P) / Previous (B) / Next (N)
+super + shift + p
+    playerctl play-pause
+
+super + shift + b
+    playerctl previous
+
+super + shift + n
+    playerctl next
+
+# Hardware media keys (playerctl, mpd fallback)
+XF86Audio{Play,Next,Prev,Stop}
+    ~/bin/media {play-pause,next,previous,stop}
+
+# =============================================================================
+# 5. BSPWM: WINDOW STATES & LAYOUT
+# =============================================================================
+
+# Toggle pseudo-tiled mode (Two-way toggle)
+super + ctrl + t
+    bspc node -t ~pseudo_tiled
+
+# Toggle fullscreen mode (F = Fullscreen)
+super + f
+    bspc node -t ~fullscreen
+
+# Toggle floating mode (A = Alternative / Floating)
+super + a
+    bspc node -t ~floating
+
+# Cycle window focus (including floating)
+alt + {_,shift + }Tab
+    bspc node -f {next.local,prev.local}
+
+# Focus last node / desktop
+super + {grave,Tab}
+    bspc {node,desktop} -f last
+
+# Swap current node with the biggest window
+super + g
+    bspc node -s biggest.window
+
+# Set node flags (x = locked, y = sticky, z = private)
+super + ctrl + {x,y,z}
+    bspc node -g {locked,sticky,private}
+
+# =============================================================================
+# 6. BSPWM: NAVIGATION, SWAP & RESIZE (VIM HJKL)
+# =============================================================================
+
+# Move focus (Super) or swap node (Super + Shift)
+super + {_,shift + }{h,j,k,l}
+    bspc node -{f,s} {west,south,north,east}
+
+# Resize window (fixed syntax and correct Vim directions)
+super + ctrl + {h,j,k,l}
+    bspc node -z {left -20 0,bottom 0 20,top 0 -20,right 20 0}
+
+# Workspace routing (1-9): switch desktop / send node / send and follow
+super + {_,shift + ,ctrl + }{1-9}
+    bspc {desktop -f,node -d,node -d --follow} '^{1-9}'
+
+# Navigate workspaces with mouse wheel
+super + {button4,button5}
+    bspc desktop -f {prev.local,next.local}
+
+# Move window across workspaces with mouse wheel
+super + ctrl + {button4,button5}
+    bspc node -d {prev.local,next.local} --follow
+
+# Focus previous / next window on desktop with mouse wheel
+super + shift + {button4,button5}
+    bspc node -f {prev.local,next.local}

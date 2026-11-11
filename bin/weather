@@ -1,0 +1,25 @@
+#!/bin/sh
+# Weather for the current location.
+# Override the city by writing it to ~/.config/weather-city.
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/weather-city"
+
+if [ -f "$CONF" ]; then
+    city=$(sed -n '1p' "$CONF")
+else
+    city=$(curl -fsS --max-time 5 'https://wttr.in/?format=%l' 2>/dev/null)
+fi
+[ -z "$city" ] && exit 0
+
+city=$(printf '%s' "$city" | tr ' ' '+')
+temp=$(curl -fsS --max-time 5 "https://wttr.in/${city}?format=%t" 2>/dev/null)
+[ -z "$temp" ] && exit 0
+case "$temp" in
+    *Unknown*|*HTML*|*curl*) exit 0 ;;
+esac
+
+# wttr.in sometimes returns a leading plus or "+-0°C"; normalize it.
+temp=${temp#+}
+[ "$temp" = "-0°C" ] && temp="0°C"
+
+printf '󰖐 %s' "$temp"

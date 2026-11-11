@@ -1,0 +1,23 @@
+#!/bin/sh
+# Show all sxhkd hotkeys in a rofi menu.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/keybindings.lock"
+flock -n 9 || exit 0
+
+SRC="${XDG_CONFIG_HOME:-$HOME/.config}/sxhkd/sxhkdrc"
+[ -f "$SRC" ] || exit 1
+
+awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    /^[^[:space:]]/   { keys=$0; next }
+    {
+        line=$0
+        sub(/^[[:space:]]+/, "", line)
+        if (line ~ /\\$/) { sub(/\\$/, "", line); buf = buf line " "; next }
+        cmd = buf line
+        buf = ""
+        gsub(/[[:space:]]+/, " ", cmd)
+        printf "%-42s  %s\n", keys, cmd
+    }
+' "$SRC" | rofi -dmenu -i -p "Hotkeys" \
+    -theme-str 'window {width: 62%;} listview {lines: 22;}'

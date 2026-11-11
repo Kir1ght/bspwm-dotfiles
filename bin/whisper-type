@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+PID_FILE="/tmp/whisper_rec.pid"
+AUDIO_FILE="/tmp/whisper_input.wav"
+
+# Serialise the record/stop state machine. Without this, a double press could
+# start a new recording while the previous transcription was still running and
+# then delete the new audio file at the end.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/whisper-type.lock"
+flock -n 9 || exit 0
+MODEL="$HOME/.local/share/whisper/ggml-small.bin"
+[ ! -f "$MODEL" ] && MODEL="$HOME/.local/share/whisper-models/ggml-small.bin"
+
+export CUDA_VISIBLE_DEVICES=""
+
+if command -v whisper-cli >/dev/null 2>&1; then
+    WHISPER_BIN="whisper-cli"
+elif command -v whisper-cpp >/dev/null 2>&1; then
+    WHISPER_BIN="whisper-cpp"
+else
+    WHISPER_BIN="whisper"
+fi
+
+# Промпт, который помогает мелкой модели не путать сленг и контекст чата
+CHAT_PROMPT="Разговорный чат, живая речь, сленг, дискорд, телеграм, че как, го, ща, лол, имба, хз, всм, пж, кст, типа, короче."
+
+if [ -f "$PID_FILE" ]; then
+    REC_PID=$(cat "$PID_FILE")
+    kill "$REC_PID" 2>/dev/null
+    rm -f "$PID_FILE"
+
+    [ ! -f "$AUDIO_FILE" ] && exit 1
+
+    notify-send -a "Whisper" -i audio-input-microphone "Fast..." -t 600
+
+    # Молниеносная маленькая модель + промпт для контекста
+    TEXT=$(nice -n -15 $WHISPER_BIN \
+        -m "$MODEL" \
+        -f "$AUDIO_FILE" \
+        -l ru \
+        -ng \
+        -bs 1 -bo 1 \
+        -t $(nproc) \
+        --no-timestamps \
+        --prompt "$CHAT_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g')
+
+    if [ -n "$TEXT" ]; then
+        xdotool type --clearmodifiers "$TEXT "
+    fi
+
+    rm -f "$AUDIO_FILE"
+else
+    rm -f "$AUDIO_FILE"
+    # Do not leak the lock fd into the long-lived recorder: the stop press
+    # must still be able to acquire it while this process has exited.
+    rec -q -c 1 -r 16000 "$AUDIO_FILE" 9>&- &
+    echo $! > "$PID_FILE"
+    notify-send -a "Whisper" -i media-record "Listening..." -t 500
+fi

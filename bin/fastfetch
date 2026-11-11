@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+# fastfetch wrapper: draw Asuna from the default wallpaper at the size of the
+# current terminal. Arguments are passed straight to the real fastfetch, so
+# `fastfetch --version`, custom configs and piped output keep working.
+
+real=/usr/bin/fastfetch
+if [ ! -x "$real" ]; then
+    real=$(PATH=/usr/local/bin:/usr/bin:/bin command -v fastfetch 2>/dev/null) || exit 127
+fi
+
+if [ "$#" -gt 0 ] || [ ! -t 1 ]; then
+    exec "$real" "$@"
+fi
+
+cols=$(tput cols 2>/dev/null || echo 100)
+lines=$(tput lines 2>/dev/null || echo 30)
+
+# Too small for a logo plus the module list: skip the art instead of wrapping.
+if [ "$cols" -lt 60 ] || [ "$lines" -lt 12 ]; then
+    exec "$real" --logo none
+fi
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/fastfetch"
+mkdir -p "$cache"
+logo="$cache/asuna-v6-${cols}x${lines}.ansi"
+source="$HOME/.config/fastfetch/asuna.png"
+
+if [ ! -s "$logo" ] || [ "$source" -nt "$logo" ]; then
+    if ! python3 "$HOME/.config/fastfetch/render-logo.py" \
+        "$source" "$logo" "$cols" "$lines"; then
+        rm -f "$logo"
+        exec "$real"
+    fi
+fi
+
+exec "$real" --logo-type file-raw --logo "$logo"

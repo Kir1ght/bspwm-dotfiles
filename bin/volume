@@ -1,0 +1,80 @@
+#!/bin/bash
+
+## Script To Manage Speaker Volume.
+
+# Serialise read-modify-write cycles: hardware volume keys and Polybar actions
+# can fire several times per second and `pamixer -i/-d` would otherwise read
+# the same base value and drop steps.
+lock() {
+	exec 9>"${XDG_RUNTIME_DIR:-/tmp}/volume.lock"
+	flock -w 2 9 || exit 1
+}
+
+# Get Volume
+get_volume() {
+	pamixer --get-volume
+}
+
+# Get icons
+get_icon() {
+	current=$(get_volume)
+	if [[ "$current" -eq 0 ]]; then
+		icon='/usr/share/icons/Papirus-Dark/symbolic/status/audio-volume-muted-symbolic.svg'
+	elif [[ "$current" -le 30 ]]; then
+		icon='/usr/share/icons/Papirus-Dark/symbolic/status/audio-volume-low-symbolic.svg'
+	elif [[ "$current" -le 60 ]]; then
+		icon='/usr/share/icons/Papirus-Dark/symbolic/status/audio-volume-medium-symbolic.svg'
+	else
+		icon='/usr/share/icons/Papirus-Dark/symbolic/status/audio-volume-high-symbolic.svg'
+	fi
+}
+
+# Increase Volume (hard limit 100%)
+up_volume() {
+	current=$(get_volume)
+	if [ "$current" -lt 100 ]; then
+		# If step would exceed 100, set to 100 explicitly
+		if [ $((current + 2)) -gt 100 ]; then
+			pamixer --set-volume 100 --unmute
+		else
+			pamixer -i 2 --unmute
+		fi
+	fi
+	get_icon && dunstify -u low --replace=69 -i "$icon" "Volume : $(get_volume)%"
+}
+
+# Decrease Volume
+down_volume() {
+	pamixer -d 2 --unmute && get_icon && dunstify -u low --replace=69 -i "$icon" "Volume : $(get_volume)%"
+}
+
+# Toggle Mute
+toggle_mute() {
+	if [[ "$(pamixer --get-mute)" == "true" ]]; then
+		pamixer --unmute && get_icon && dunstify -u low --replace=69 -i "$icon" "Unmute"
+	else
+		pamixer --mute && dunstify -u low --replace=69 -i '/usr/share/icons/Papirus-Dark/symbolic/status/audio-volume-muted-symbolic.svg' "Mute"
+	fi
+}
+
+# Execute accordingly
+case "$1" in
+	--get)
+		get_volume
+		;;
+	--up)
+		lock
+		up_volume
+		;;
+	--down)
+		lock
+		down_volume
+		;;
+	--toggle)
+		lock
+		toggle_mute
+		;;
+	*)
+		get_volume
+		;;
+esac

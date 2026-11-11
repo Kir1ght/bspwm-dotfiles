@@ -1,0 +1,44 @@
+#!/bin/bash
+# Periodic clipboard history reset for greenclip.
+#
+# greenclip serialises its history with Haskell's Data.Binary (a custom
+# binary format), so we cannot safely prune individual entries from the
+# outside. The safest approach is a full reset: stop the daemon, remove the
+# history file (and cached images), and start the daemon again with a fresh
+# (empty) history.
+#
+# The interval is controlled by the systemd timer (see
+# ~/.config/systemd/user/greenclip-autoclear.timer).
+
+# Serialise with a manual run and with bspwmrc's greenclip start: removing the
+# history while the daemon is being restarted can resurrect stale entries.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/greenclip-autoclear.lock"
+flock -n 9 || exit 0
+
+HIST="$HOME/.cache/greenclip.history"
+IMG_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/greenclip-images"
+GC="$HOME/.local/bin/greenclip"
+
+# Only reset if the history is older than MAX_AGE_DAYS (default 7).
+MAX_AGE_DAYS="${MAX_AGE_DAYS:-7}"
+
+[ -f "$HIST" ] || exit 0
+
+# Compute age in days from mtime.
+if command -v stat > /dev/null 2>&1; then
+    now=$(date +%s)
+    mt=$(stat -c %Y "$HIST")
+    age_days=$(( (now - mt) / 86400 ))
+    [ "$age_days" -lt "$MAX_AGE_DAYS" ] && exit 0
+fi
+
+# Stop daemon, clear history + image cache, restart daemon.
+pkill -x greenclip 2> /dev/null
+sleep 0.3
+rm -f "$HIST"
+[ -d "$IMG_CACHE" ] && rm -rf "${IMG_CACHE:?}"/*
+
+# Restart the daemon if it is not running (uses user session).
+pgrep -x greenclip > /dev/null || {
+    [ -x "$GC" ] && "$GC" daemon > /dev/null 2>&1 &
+}

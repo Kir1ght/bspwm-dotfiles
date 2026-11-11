@@ -1,0 +1,3 @@
+#!/bin/sh
+# Update the system in a terminal and keep the window open.
+exec alacritty --hold -e paru -Syu

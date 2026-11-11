@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+PID_FILE="/tmp/whisper_listen.pid"
+AUDIO_PATH_FILE="/tmp/whisper_listen_path.tmp"
+
+# Serialise the record/stop state machine (see whisper-type).
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/whisper-listen.lock"
+flock -n 9 || exit 0
+AUDIO_DIR="$HOME/Audio/Recordings"
+mkdir -p "$AUDIO_DIR"
+
+CLEAN_WAV="/tmp/whisper_listen_clean.wav"
+MODEL="$HOME/.local/share/whisper/ggml-large-v3-turbo-q5_0.bin"
+
+export CUDA_VISIBLE_DEVICES=""
+
+if command -v whisper-cli >/dev/null 2>&1; then
+    WHISPER_BIN="whisper-cli"
+elif command -v whisper-cpp >/dev/null 2>&1; then
+    WHISPER_BIN="whisper-cpp"
+else
+    WHISPER_BIN="whisper"
+fi
+
+LECTURE_PROMPT="Конспект университетской лекции на русском языке. Грамотная академическая речь, точная терминология, развернутые предложения, правильная пунктуация."
+
+if [ -f "$PID_FILE" ]; then
+    REC_PID=$(cat "$PID_FILE")
+    RAW_AUDIO=$(cat "$AUDIO_PATH_FILE" 2>/dev/null)
+    rm -f "$PID_FILE" "$AUDIO_PATH_FILE"
+
+    kill "$REC_PID" 2>/dev/null
+    sleep 0.5
+
+    if [ ! -f "$RAW_AUDIO" ]; then
+        notify-send -u critical "Lecture" "Audio file missing!"
+        exit 1
+    fi
+
+    notify-send -a "Lecture" -i audio-input-microphone "Enhancing & transcribing lecture..." -t 3000
+
+# Fast & clean audio filtering (removed heavy afftdn to speed up processing)
+    ffmpeg -y -i "$RAW_AUDIO" -af "highpass=f=80,lowpass=f=8000,dynaudnorm=p=0.9:s=5" -ar 16000 -ac 1 -c:a pcm_s16le "$CLEAN_WAV" -loglevel error
+
+    # Fast CPU inference with Turbo model (bs 2 + all threads)
+    TEXT=$(nice -n -10 $WHISPER_BIN -m "$MODEL" -f "$CLEAN_WAV" -l ru -ng -bs 2 -bo 2 -t $(nproc) --prompt "$LECTURE_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g')
+
+    rm -f "$CLEAN_WAV"
+
+    if [ -n "$TEXT" ]; then
+        TXT_FILE="${RAW_AUDIO%.*}.txt"
+        echo "$TEXT" > "$TXT_FILE"
+        xdotool type --clearmodifiers "$TEXT "
+        notify-send -a "Lecture" -i dialog-information "Saved: $(basename "$TXT_FILE")" -t 5000
+    else
+        notify-send -u critical "Lecture" "Transcription resulted in empty text."
+    fi
+else
+    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+    RAW_AUDIO="$AUDIO_DIR/lecture_${TIMESTAMP}.m4a"
+    echo "$RAW_AUDIO" > "$AUDIO_PATH_FILE"
+
+    notify-send -a "Lecture" -i media-record "Recording lecture..." -t 1500
+    ffmpeg -y -f pulse -i default -c:a aac -b:a 128k "$RAW_AUDIO" -loglevel quiet 9>&- &
+    echo $! > "$PID_FILE"
+fi

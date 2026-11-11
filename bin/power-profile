@@ -1,0 +1,52 @@
+#!/bin/sh
+
+# Power-profile indicator/toggle for Polybar.
+# Use busctl instead of powerprofilesctl: the latter is a Python/gi program
+# that is slower and can abort during interpreter shutdown (leaving coredumps)
+# when polled every couple of seconds.
+
+COLORS="$HOME/.config/polybar/colors.ini"
+TOGGLE_LOCK="${XDG_RUNTIME_DIR:-/tmp}/power-profile-toggle.lock"
+IFACE="net.hadess.PowerProfiles"
+PATH_OBJ="/net/hadess/PowerProfiles"
+
+read_color() {
+    awk -F' = ' -v key="$1" '$1 == key {print $2; exit}' "$COLORS" 2>/dev/null
+}
+
+get_profile() {
+    busctl --system get-property "$IFACE" "$PATH_OBJ" "$IFACE" ActiveProfile 2>/dev/null |
+        sed -n 's/^s "\(.*\)"$/\1/p'
+}
+
+set_profile() {
+    busctl --system set-property "$IFACE" "$PATH_OBJ" "$IFACE" ActiveProfile s "$1" >/dev/null 2>&1
+}
+
+case "$1" in
+    --toggle)
+        # Read-modify-write on the profile: serialise so rapid clicks don't
+        # all read the same profile and collapse into one transition.
+        exec 9>"$TOGGLE_LOCK"
+        flock -w 1 9 || exit 1
+        case "$(get_profile)" in
+            power-saver) set_profile balanced ;;
+            balanced)    set_profile performance ;;
+            performance) set_profile power-saver ;;
+            *)           set_profile balanced ;;
+        esac
+        ;;
+    *)
+        CURRENT=$(get_profile)
+        accent=$(read_color accent)
+        dim=$(read_color fg-dim)
+        [ -n "$accent" ] || accent="#9080da"
+        [ -n "$dim" ] || dim="#928fa3"
+        case "$CURRENT" in
+            power-saver) printf '%%{F%s}%%{F-} %%{F%s}Eco%%{F-}' "$accent" "$dim" ;;
+            balanced)    printf '%%{F%s}%%{F-} %%{F%s}Bal%%{F-}' "$accent" "$dim" ;;
+            performance) printf '%%{F%s}%%{F-} %%{F%s}Perf%%{F-}' "$accent" "$dim" ;;
+            *)           printf '%%{F%s}%%{F-} %%{F%s}N/A%%{F-}' "$dim" "$dim" ;;
+        esac
+        ;;
+esac
