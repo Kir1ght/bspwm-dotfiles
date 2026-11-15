@@ -316,8 +316,7 @@ touchpad-autoswitch toggle  # переключить
 touchpad-autoswitch status  # показать состояние
 ```
 
-С клавиатуры — `Super + Alt + U` (`Super + Shift + U` занят обновлением
-системы).
+С клавиатуры — `Super + Shift + U`.
 
 Состояние хранится в `~/.local/state/touchpad-when-mouse.off`: есть файл —
 автоматика выключена. Лог демона: `~/.local/state/touchpad-when-mouse.log`.
@@ -343,7 +342,7 @@ touchpad-autoswitch status  # показать состояние
 
 Направления «естественные»: свайп влево — вперёд, вправо — назад. Если
 подключена мышь и тачпад выключен автоматикой, жесты не работают — это
-ожидаемо. Включить тачпад: `Super + Alt + U` или `touchpad-autoswitch off`.
+ожидаемо. Включить тачпад: `Super + Shift + U` или `touchpad-autoswitch off`.
 
 Конфиг: `~/.config/touchegg/touchegg.conf`. После правки перезапустите
 клиент: `pkill -f '[t]ouchegg$'` и снова войдите в сессию (или запустите

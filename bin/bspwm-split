@@ -53,9 +53,9 @@ case "${1:-}" in
         focused=$("$BSPC" query -N -n focused) || die "No focused window"
         "$BSPC" node -g marked || die "Could not toggle the mark"
         if "$BSPC" query -N -n .marked | grep -qx "$focused"; then
-            say "Окно помечено" "Теперь выберите окно-цель"
+            say "Window marked" "Now focus the target window"
         else
-            say "Метка снята"
+            say "Mark removed"
         fi
         ;;
     left|right|up|down)
@@ -66,28 +66,28 @@ case "${1:-}" in
             down)  dir=south ;;
         esac
         "$BSPC" node -p "$dir" || die "Could not preselect the $1 half"
-        say "Половинка: $1" "Super+Alt+Enter — вставить помеченное окно"
+        say "Half: $1" "Super+Alt+Enter to insert the marked window"
         ;;
     apply)
         focused=$("$BSPC" query -N -n focused) || die "No focused window"
         marked=$("$BSPC" query -N -n .marked | head -n1)
 
-        [[ -n "$marked" ]] || die "Нет помеченного окна" "Сначала Super+Alt+M"
-        [[ "$marked" != "$focused" ]] || die "Помечено текущее окно" "Сначала выберите окно-цель"
+        [[ -n "$marked" ]] || die "No marked window" "Press Super+Alt+M first"
+        [[ "$marked" != "$focused" ]] || die "The marked window is focused" "Focus the target window first"
 
         if "$BSPC" query -T -n focused | grep -q '"presel":null'; then
-            die "У цели нет половинки" "Сначала Super+Alt+H/J/K/L"
+            die "Target has no preselection" "Press Super+Alt+H/J/K/L first"
         fi
 
         # A floating or fullscreen source would stay outside the tiling tree.
         "$BSPC" node "$marked" -t tiled >/dev/null 2>&1 || true
         "$BSPC" node "$marked" -n focused || die "Could not move the marked window"
         "$BSPC" node "$marked" -g marked=off >/dev/null 2>&1 || true
-        say "Окно вставлено" "В выбранную половинку"
+        say "Window inserted" "Into the selected half"
         ;;
     cancel)
         "$BSPC" node -p cancel || die "Could not cancel the preselection"
-        say "Половинка отменена"
+        say "Preselection cancelled"
         ;;
     status)
         focused=$("$BSPC" query -N -n focused 2>/dev/null || true)

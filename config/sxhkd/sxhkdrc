@@ -85,10 +85,6 @@ super + shift + x
 super + question
     ~/bin/keybindings
 
-# Update the system
-super + shift + u
-    ~/bin/system-update
-
 # Set random wallpaper
 ctrl + shift + t
     ~/bin/random_wallpaper
@@ -258,6 +254,5 @@ super + shift + {button4,button5}
     bspc node -f {prev.local,next.local}
 
 # Toggle: touchpad off while a mouse is connected <-> touchpad always on
-# (Super+Shift+U is system-update, so the touchpad uses Super+Alt+U.)
-super + alt + u
+super + shift + u
     ~/.local/bin/touchpad-autoswitch toggle

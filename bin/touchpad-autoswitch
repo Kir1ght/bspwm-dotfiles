@@ -48,24 +48,24 @@ status() {
 case "${1:-toggle}" in
     on)
         rm -f "$FLAG"
-        notify "Включено: тачпад гаснет при подключённой мыши"
+        notify "Enabled: touchpad turns off while a mouse is connected"
         echo "on"
         ;;
     off)
         : > "$FLAG"
-        set_touchpad enable          # мгновенно вернуть тачпад, не ждать демона
-        notify "Выключено: тачпад всегда включён"
+        set_touchpad enable          # re-enable immediately, don't wait for the daemon
+        notify "Disabled: touchpad stays on"
         echo "off"
         ;;
     toggle)
         if is_off; then
             rm -f "$FLAG"
-            notify "Включено: тачпад гаснет при подключённой мыши"
+            notify "Enabled: touchpad turns off while a mouse is connected"
             echo "on"
         else
             : > "$FLAG"
             set_touchpad enable
-            notify "Выключено: тачпад всегда включён"
+            notify "Disabled: touchpad stays on"
             echo "off"
         fi
         ;;
