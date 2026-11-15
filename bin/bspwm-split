@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Niri-style split placement for bspwm.
+#
+# bspwm has no drag-to-split: dragging a tiled window over another one swaps
+# them. This helper gives the same result with a short keyboard workflow:
+#
+#   1. mark the window you want to move        (Super+Alt+M)
+#   2. focus the window that should be split  (usual focus keys)
+#   3. preselect one half of the target        (Super+Alt+H/J/K/L)
+#   4. drop the marked window into that half   (Super+Alt+Enter)
+#
+# Cancel a preselection with Super+Alt+C.
+
+set -u
+
+BSPC=${BSPC:-bspc}
+
+say() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a bspwm-split "${1:-bspwm-split}" "${2:-}" -t 1400 >/dev/null 2>&1 || true
+    fi
+}
+
+die() {
+    say "$1" "${2:-}"
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: bspwm-split COMMAND
+
+Commands:
+  mark                 mark or unmark the focused window
+  left|right|up|down   preselect a half of the focused window
+  apply                put the marked window into the preselected half
+  cancel               cancel the preselection
+  status               show the current mark and preselection
+
+Default keys:
+  Super+Alt+M          mark/unmark
+  Super+Alt+H/J/K/L    left/down/up/right
+  Super+Alt+Enter      apply
+  Super+Alt+C          cancel
+EOF
+}
+
+command -v "$BSPC" >/dev/null 2>&1 || die "bspc not found"
+
+case "${1:-}" in
+    mark)
+        focused=$("$BSPC" query -N -n focused) || die "No focused window"
+        "$BSPC" node -g marked || die "Could not toggle the mark"
+        if "$BSPC" query -N -n .marked | grep -qx "$focused"; then
+            say "Окно помечено" "Теперь выберите окно-цель"
+        else
+            say "Метка снята"
+        fi
+        ;;
+    left|right|up|down)
+        case "$1" in
+            left)  dir=west ;;
+            right) dir=east ;;
+            up)    dir=north ;;
+            down)  dir=south ;;
+        esac
+        "$BSPC" node -p "$dir" || die "Could not preselect the $1 half"
+        say "Половинка: $1" "Super+Alt+Enter — вставить помеченное окно"
+        ;;
+    apply)
+        focused=$("$BSPC" query -N -n focused) || die "No focused window"
+        marked=$("$BSPC" query -N -n .marked | head -n1)
+
+        [[ -n "$marked" ]] || die "Нет помеченного окна" "Сначала Super+Alt+M"
+        [[ "$marked" != "$focused" ]] || die "Помечено текущее окно" "Сначала выберите окно-цель"
+
+        if "$BSPC" query -T -n focused | grep -q '"presel":null'; then
+            die "У цели нет половинки" "Сначала Super+Alt+H/J/K/L"
+        fi
+
+        "$BSPC" node "$marked" -n focused || die "Could not move the marked window"
+        "$BSPC" node "$marked" -g marked=off >/dev/null 2>&1 || true
+        say "Окно вставлено" "В выбранную половинку"
+        ;;
+    cancel)
+        "$BSPC" node -p cancel || die "Could not cancel the preselection"
+        say "Половинка отменена"
+        ;;
+    status)
+        focused=$("$BSPC" query -N -n focused 2>/dev/null || true)
+        marked=$("$BSPC" query -N -n .marked 2>/dev/null | tr '\n' ' ' || true)
+        printf 'focused: %s\n' "${focused:-none}"
+        printf 'marked:  %s\n' "${marked:-none}"
+        if [[ -n "$focused" ]]; then
+            "$BSPC" query -T -n focused 2>/dev/null | grep -o '"presel":[^,}]*' || true
+        fi
+        ;;
+    ""|-h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

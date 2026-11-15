@@ -122,6 +122,12 @@ pkill greenclip; "$HOME/.local/bin/greenclip" daemon &
 # выключать тачпад, пока подключена любая мышь
 setsid -f ~/.local/bin/touchpad-when-mouse.sh >/dev/null 2>&1
 
+# Touchpad gestures. The Touchégg daemon is a system service (install.sh
+# enables it); this is the per-session client that applies our config.
+if command -v touchegg >/dev/null 2>&1; then
+    pgrep -f '[t]ouchegg$' >/dev/null 2>&1 || setsid -f touchegg >/dev/null 2>&1
+fi
+
 # Run the cursor tracker detached: it loops forever and must not block bspwmrc.
 pkill -f "$HOME/bin/cursor_tracker.sh" 2>/dev/null || true
 setsid -f "$HOME/bin/cursor_tracker.sh" >/dev/null 2>&1

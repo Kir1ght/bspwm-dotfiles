@@ -228,6 +228,19 @@ super + {_,shift + }{h,j,k,l}
 super + ctrl + {h,j,k,l}
     bspc node -z {left -20 0,bottom 0 20,top 0 -20,right 20 0}
 
+# Niri-style split: mark source -> focus target -> preselect half -> apply
+super + alt + m
+    ~/.local/bin/bspwm-split mark
+
+super + alt + {h,j,k,l}
+    ~/.local/bin/bspwm-split {left,down,up,right}
+
+super + alt + Return
+    ~/.local/bin/bspwm-split apply
+
+super + alt + c
+    ~/.local/bin/bspwm-split cancel
+
 # Workspace routing (1-9): switch desktop / send node / send and follow
 super + {_,shift + ,ctrl + }{1-9}
     bspc {desktop -f,node -d,node -d --follow} '^{1-9}'
@@ -245,5 +258,6 @@ super + shift + {button4,button5}
     bspc node -f {prev.local,next.local}
 
 # Toggle: touchpad off while a mouse is connected <-> touchpad always on
-super + shift + u
+# (Super+Shift+U is system-update, so the touchpad uses Super+Alt+U.)
+super + alt + u
     ~/.local/bin/touchpad-autoswitch toggle

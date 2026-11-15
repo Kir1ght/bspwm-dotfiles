@@ -135,6 +135,8 @@ PACMAN_CORE=(
     bspwm sxhkd polybar picom rofi dunst feh
     xorg-server xorg-xinit xorg-setxkbmap xorg-xrandr xorg-xsetroot xorg-xset xorg-xrdb
     xorg-xinput xorg-xbacklight xorg-xwininfo xorg-xdpyinfo xorg-xprop
+    # touchpad gestures
+    touchegg
     # terminal / shell
     alacritty kitty fish
     # launcher, clipboard, screenshots
@@ -262,6 +264,17 @@ install_multilib() {
         install_pacman "${MULTILIB_PKGS[@]}"
     else
         warn "The [multilib] repository is disabled; skipping lib32 packages."
+    fi
+}
+
+install_touchegg_service() {
+    command -v touchegg >/dev/null 2>&1 || return 0
+
+    log "Enabling Touchégg gesture daemon..."
+    if sudo systemctl enable --now touchegg.service >/dev/null 2>&1; then
+        ok "Touchégg daemon enabled."
+    else
+        warn "Could not enable touchegg.service. Run: sudo systemctl enable --now touchegg"
     fi
 }
 
@@ -622,6 +635,7 @@ if ((DO_GPU)); then
 fi
 
 install_throne_caps
+install_touchegg_service
 
 if ((DO_CONFIG)); then
     install_configs
@@ -658,6 +672,8 @@ Next steps:
   8. Display manager:       the author uses ly@tty2; otherwise startx reads ~/.xinitrc
   9. Whisper models:        ./install.sh --with-whisper
  10. Firefox:               close and reopen it; user.js/chrome apply on startup.
+ 11. Touchpad gestures:     touchegg client starts with bspwm; check the daemon:
+                            systemctl status touchegg.service
 
 Logs and backups are in:   ~/.dotfiles-backup-*
 EOF

@@ -10,6 +10,8 @@ PACMAN_CORE = [
     "xorg-server", "xorg-xinit", "xorg-setxkbmap", "xorg-xrandr",
     "xorg-xsetroot", "xorg-xset", "xorg-xrdb", "xorg-xinput",
     "xorg-xbacklight", "xorg-xwininfo", "xorg-xdpyinfo", "xorg-xprop",
+    # touchpad gestures
+    "touchegg",
     # terminal / shell
     "alacritty", "kitty", "fish",
     # launcher, clipboard, screenshots
