@@ -20,37 +20,78 @@ fi
 
 echo "start $(date -Is) DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset}"
 
-mouse_present() {
-    "$XINPUT" list 2>/dev/null \
-        | sed -n 's/.*↳ \(.*\)[[:space:]]\+id=[0-9].*\[slave  pointer.*/\1/p' \
-        | grep -viE "$INTERNAL_RE" \
-        | grep -viE 'Virtual core|XTEST' \
-        | grep -q .
+# Output: id<TAB>name<TAB>state for every input device.
+# Matches both enabled devices ("↳ Name  id=15 [slave pointer]") and
+# disabled ones ("∼ Name  id=15 [floating slave]").
+read_devices() {
+    "$XINPUT" list --short 2>/dev/null \
+        | sed -n 's/^[^A-Za-z0-9]*[[:space:]]*\(.*\)[[:space:]]\+id=\([0-9]\+\).*\[\([^]]*\)\].*/\2\t\1\t\3/p'
 }
 
 while :; do
-    # Re-read every cycle: on early bspwm startup xinput may not be ready yet,
-    # and touchpad names can theoretically change after suspend/resume.
-    mapfile -t TP_LIST < <("$XINPUT" list --name-only 2>/dev/null | grep -i 'touchpad' || true)
+    TP_IDS=()
+    TP_NAMES=()
+    DEV_IDS=()
+    DEV_NAMES=()
+    DEV_STATES=()
 
-    if [ "${#TP_LIST[@]}" -eq 0 ]; then
+    while IFS=$'\t' read -r id name state; do
+        [ -z "$id" ] && continue
+        name=${name#"∼ "}
+        # xinput pads names with spaces before "id="; trim them.
+        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        DEV_IDS+=("$id")
+        DEV_NAMES+=("$name")
+        DEV_STATES+=("$state")
+        if printf '%s' "$name" | grep -qi 'touchpad'; then
+            TP_IDS+=("$id")
+            TP_NAMES+=("$name")
+        fi
+    done < <(read_devices)
+
+    # XInput may not be ready yet during early bspwm startup.
+    if [ "${#TP_IDS[@]}" -eq 0 ]; then
         sleep 2
         continue
     fi
 
+    # Devices that must NOT count as a mouse: virtual devices and the internal
+    # "Mouse" interface that shares the touchpad's name prefix.
     INTERNAL_RE='Virtual core|XTEST'
-    for tp in "${TP_LIST[@]}"; do
-        [ -z "$tp" ] && continue
-        base=${tp%%[Tt]ouch[Pp]ad}
+    for name in "${TP_NAMES[@]}"; do
+        base=${name%%[Tt]ouch[Pp]ad}
         base=${base%%[Tt][Oo][Uu][Cc][Hh][Pp][Aa][Dd]}
         esc=$(printf '%s' "$base" | sed 's/[][^$.*+?(){}\\|]/\\&/g')
         INTERNAL_RE="$INTERNAL_RE|${esc}"
     done
 
-    if mouse_present; then
-        for tp in "${TP_LIST[@]}"; do "$XINPUT" disable "$tp" 2>/dev/null; done
+    mouse_present=0
+    for i in "${!DEV_IDS[@]}"; do
+        name=${DEV_NAMES[$i]}
+        state=${DEV_STATES[$i]}
+
+        # Only real pointer devices. A disabled touchpad is "floating slave".
+        case "$state" in
+            *pointer*) ;;
+            *) continue ;;
+        esac
+
+        case "$name" in
+            "Virtual core"*|"XTEST"*) continue ;;
+        esac
+
+        if printf '%s' "$name" | grep -qiE "$INTERNAL_RE"; then
+            continue
+        fi
+
+        mouse_present=1
+        break
+    done
+
+    if [ "$mouse_present" -eq 1 ]; then
+        for id in "${TP_IDS[@]}"; do "$XINPUT" disable "$id" 2>/dev/null; done
     else
-        for tp in "${TP_LIST[@]}"; do "$XINPUT" enable  "$tp" 2>/dev/null; done
+        for id in "${TP_IDS[@]}"; do "$XINPUT" enable  "$id" 2>/dev/null; done
     fi
 
     sleep 2
