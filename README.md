@@ -356,6 +356,11 @@ connected and the touchpad is disabled by automation, gestures do not work —
 that is expected. Enable the touchpad: `Super + Shift + U` or
 `touchpad-autoswitch off`.
 
+Touchégg reads the touchpad through libinput, so `xinput disable` alone does
+not stop gestures: the gesture client is stopped together with the touchpad
+and started again when the mouse is unplugged. Unplug the mouse (or pause the
+automation) to try the gestures.
+
 Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:
 `pkill -f '[t]ouchegg$'` and log in again (or run `touchegg` from a terminal).
 
@@ -386,6 +391,8 @@ Script: `~/.local/bin/bspwm-split` (also supports `status` and `--help`).
 - Whisper models are not stored in git; `--with-whisper` downloads them.
 - picom starts with profile `1.conf`. If you enable the second profile,
   screenshots still will not be blurred: `slop` is in the exceptions.
+  The profile animates window open/close and layout changes; comment out the
+  `animations` block in `1.conf` and restart picom to turn that off.
 - Throne gets `CAP_NET_ADMIN` through a pacman hook, so TUN works without
   root prompts after updates.
 - The `Dynamic` GTK theme is a recolored copy of Dracula. Open windows pick up

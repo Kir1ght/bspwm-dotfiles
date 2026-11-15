@@ -22,6 +22,22 @@ fi
 
 echo "start $(date -Is) DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset}"
 
+# Last gesture state, so the client is stopped/started only on transitions.
+last_gestures=""
+
+# Touchégg reads the touchpad through libinput, so `xinput disable` does not
+# stop its gestures: the client has to be stopped as well. Only the client
+# executes actions — the system daemon (`touchegg --daemon`) can keep running.
+gestures() {   # $1 = on|off
+    command -v touchegg >/dev/null 2>&1 || return 0
+    if [ "$1" = off ]; then
+        pgrep -f '[t]ouchegg$' >/dev/null 2>&1 && pkill -f '[t]ouchegg$'
+    else
+        pgrep -f '[t]ouchegg$' >/dev/null 2>&1 \
+            || setsid -f touchegg >/dev/null 2>&1
+    fi
+}
+
 # Output: id<TAB>name<TAB>state for every input device.
 # Matches both enabled devices ("↳ Name  id=15 [slave pointer]") and
 # disabled ones ("∼ Name  id=15 [floating slave]").
@@ -60,6 +76,11 @@ while :; do
     # Manual override: `touchpad-autoswitch off` creates this flag.
     if [ -f "$OFF_FLAG" ]; then
         for id in "${TP_IDS[@]}"; do "$XINPUT" enable "$id" 2>/dev/null; done
+        if [ "$last_gestures" != "on" ]; then
+            echo "gestures on (automation paused) $(date -Is)"
+            gestures on
+            last_gestures=on
+        fi
         sleep 2
         continue
     fi
@@ -99,8 +120,18 @@ while :; do
 
     if [ "$mouse_present" -eq 1 ]; then
         for id in "${TP_IDS[@]}"; do "$XINPUT" disable "$id" 2>/dev/null; done
+        if [ "$last_gestures" != "off" ]; then
+            echo "mouse connected: touchpad off, gestures off $(date -Is)"
+            gestures off
+            last_gestures=off
+        fi
     else
         for id in "${TP_IDS[@]}"; do "$XINPUT" enable  "$id" 2>/dev/null; done
+        if [ "$last_gestures" != "on" ]; then
+            echo "mouse disconnected: touchpad on, gestures on $(date -Is)"
+            gestures on
+            last_gestures=on
+        fi
     fi
 
     sleep 2
