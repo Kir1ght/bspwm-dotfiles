@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Niri-style split placement for bspwm.
+# Niri-style split placement for bspwm (keyboard-only workflow).
 #
 # bspwm has no drag-to-split: dragging a tiled window over another one swaps
-# them. This helper gives the same result with a short keyboard workflow:
+# them. This helper gives the split result without touching the mouse:
 #
 #   1. mark the window you want to move        (Super+Alt+M)
 #   2. focus the window that should be split  (usual focus keys)
 #   3. preselect one half of the target        (Super+Alt+H/J/K/L)
 #   4. drop the marked window into that half   (Super+Alt+Enter)
 #
-# Cancel a preselection with Super+Alt+C.
+# Cancel a preselection with Super+Alt+C. Only one window is marked at a time:
+# marking another window drops the previous mark.
+#
+# The mouse/touchpad equivalent is bspwm-drag-split (Super+Alt+click/drag).
 
 set -u
 
@@ -43,7 +46,35 @@ Default keys:
   Super+Alt+H/J/K/L    left/down/up/right
   Super+Alt+Enter      apply
   Super+Alt+C          cancel
+
+Only tiled and pseudo-tiled windows can be split (a floating marked window is
+turned into a normal tile when it is applied). Fullscreen windows must leave
+fullscreen first.
 EOF
+}
+
+state_of() {
+    "$BSPC" query -T -n "$1" 2>/dev/null \
+        | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -n1
+}
+
+layout_of() {
+    "$BSPC" query -T -d 2>/dev/null \
+        | grep -o '"layout":"[^"]*"' | head -n1 | cut -d'"' -f4
+}
+
+require_tiled() {
+    case "$(state_of "$1")" in
+        tiled|pseudo_tiled) return 0 ;;
+    esac
+    die "Focus a tiled window" "Floating and fullscreen windows cannot be split"
+}
+
+clear_marks_except() {
+    local m
+    for m in $("$BSPC" query -N -n .marked 2>/dev/null); do
+        [ "$m" = "$1" ] || "$BSPC" node "$m" -g marked=off >/dev/null 2>&1 || true
+    done
 }
 
 command -v "$BSPC" >/dev/null 2>&1 || die "bspc not found"
@@ -51,11 +82,17 @@ command -v "$BSPC" >/dev/null 2>&1 || die "bspc not found"
 case "${1:-}" in
     mark)
         focused=$("$BSPC" query -N -n focused) || die "No focused window"
-        "$BSPC" node -g marked || die "Could not toggle the mark"
-        if "$BSPC" query -N -n .marked | grep -qx "$focused"; then
-            say "Window marked" "Now focus the target window"
+        [ "$(state_of "$focused")" = "fullscreen" ] \
+            && die "Leave fullscreen first" "A fullscreen window cannot be marked"
+
+        # Toggle on the focused window, but never keep a second mark around.
+        if "$BSPC" query -N -n .marked 2>/dev/null | grep -qx "$focused"; then
+            "$BSPC" node "$focused" -g marked=off || die "Could not toggle the mark"
+            say "Mark removed" "Nothing will be moved"
         else
-            say "Mark removed"
+            clear_marks_except "$focused"
+            "$BSPC" node "$focused" -g marked || die "Could not toggle the mark"
+            say "Window marked" "Now focus the target window"
         fi
         ;;
     left|right|up|down)
@@ -65,7 +102,9 @@ case "${1:-}" in
             up)    dir=north ;;
             down)  dir=south ;;
         esac
-        "$BSPC" node -p "$dir" || die "Could not preselect the $1 half"
+        focused=$("$BSPC" query -N -n focused) || die "No focused window"
+        require_tiled "$focused"
+        "$BSPC" node "$focused" -p "$dir" || die "Could not preselect the $1 half"
         say "Half: $1" "Super+Alt+Enter to insert the marked window"
         ;;
     apply)
@@ -74,16 +113,24 @@ case "${1:-}" in
 
         [[ -n "$marked" ]] || die "No marked window" "Press Super+Alt+M first"
         [[ "$marked" != "$focused" ]] || die "The marked window is focused" "Focus the target window first"
+        require_tiled "$focused"
 
-        if "$BSPC" query -T -n focused | grep -q '"presel":null'; then
+        if "$BSPC" query -T -n "$focused" | grep -q '"presel":null'; then
             die "Target has no preselection" "Press Super+Alt+H/J/K/L first"
         fi
 
-        # A floating or fullscreen source would stay outside the tiling tree.
+        # A floating/pseudo-tiled source would keep its old geometry.
         "$BSPC" node "$marked" -t tiled >/dev/null 2>&1 || true
-        "$BSPC" node "$marked" -n focused || die "Could not move the marked window"
+        if ! "$BSPC" node "$marked" -n "$focused"; then
+            "$BSPC" node "$focused" -p cancel >/dev/null 2>&1 || true
+            die "Could not move the marked window"
+        fi
         "$BSPC" node "$marked" -g marked=off >/dev/null 2>&1 || true
-        say "Window inserted" "Into the selected half"
+        if [ "$(layout_of)" = "monocle" ]; then
+            say "Window inserted" "Leave monocle to see the split"
+        else
+            say "Window inserted" "Into the selected half"
+        fi
         ;;
     cancel)
         "$BSPC" node -p cancel || die "Could not cancel the preselection"
@@ -92,7 +139,9 @@ case "${1:-}" in
     status)
         focused=$("$BSPC" query -N -n focused 2>/dev/null || true)
         marked=$("$BSPC" query -N -n .marked 2>/dev/null | tr '\n' ' ' || true)
-        printf 'focused: %s\n' "${focused:-none}"
+        printf 'focused: %s' "${focused:-none}"
+        [ -n "$focused" ] && printf ' (%s)' "$(state_of "$focused")"
+        printf '\n'
         printf 'marked:  %s\n' "${marked:-none}"
         if [[ -n "$focused" ]]; then
             "$BSPC" query -T -n focused 2>/dev/null | grep -o '"presel":[^,}]*' || true

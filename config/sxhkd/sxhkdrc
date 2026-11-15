@@ -241,10 +241,12 @@ super + alt + c
 super + {_,shift + ,ctrl + }{1-9}
     bspc {desktop -f,node -d,node -d --follow} '^{1-9}'
 
-# Drag a tiled window onto another to split it (Niri-style).
-# A plain Super-click marks a window; Super-click a half of another window
-# to place it there (no dragging needed on a touchpad).
-super + button1
+# Niri-style split placement with an extra modifier: drag a window onto a
+# half of another one, or click a window to mark it and click a half of
+# another window to place it. Plain Super + drag keeps the normal bspwm
+# move/swap; Super + middle/right drag resizes. (sxhkd can only combine real
+# modifiers with a mouse button, so the extra modifier is Alt, not a letter.)
+super + alt + button1
     ~/bin/bspwm-drag-split
 
 # Navigate workspaces with mouse wheel

@@ -188,7 +188,7 @@ before copying.
 | `Super + Shift + H/J/K/L` | swap windows |
 | `Super + Ctrl + H/J/K/L` | resize the window |
 | `Super + Ctrl + T` | pseudo-tiling: keep size / return to a normal tile |
-| `Super + drag / click` | split: drag a window onto a half, or click to mark and place |
+| `Super + Alt + drag / click` | split: drag onto a half, or click to mark and place |
 | `Alt + Shift` | us/ru layout |
 | `Ctrl + Shift + T` | random wallpaper |
 | `Ctrl + Alt + T` | choose a wallpaper |
@@ -365,20 +365,46 @@ automation) to try the gestures.
 Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:
 `pkill -f '[t]ouchegg$'` and log in again (or run `touchegg` from a terminal).
 
-### 🪟 Niri-style layout
+### 🪟 Windows: native bspwm + Niri-style split
 
-bspwm has no native drag-to-split. Instead of swapping two windows, **drag a
-window onto a half of another one**: the half under the cursor is highlighted,
-and on release the dragged window takes that half.
+Plain `Super` + mouse keeps the normal bspwm behaviour:
 
-- `Super + drag` — drag a tiled window onto another and drop it on the left,
-  right, top, or bottom half;
-- `Super + click` on a window — mark it, then `Super + click` the half of
-  another window to place it there. No dragging at all, which is much easier
-  on a touchpad. Click the marked window again to unmark it;
-- dropping on empty space or on the window itself does nothing: the old
-  "swap two windows" behaviour is gone;
-- floating windows still move with `Super + drag`.
+| Mouse | Action |
+|---|---|
+| `Super + left drag` | move a floating window; on tiled windows — swap the two windows (the usual bspwm drag) |
+| `Super + middle drag` | resize a tiled window by the border shared with its neighbour |
+| `Super + right drag` | resize a tiled window by the nearest corner |
+
+Resizing a tiled window changes a border it shares with a neighbour. A window
+that fills the monitor has nothing to resize against: make it pseudo-tiled
+(`Super + Ctrl + T`) first, then resize it with the mouse or with
+`Super + Ctrl + H/J/K/L`. Windows that report a fixed size (dialogs) keep
+that size by design.
+
+Hold **`Super + Alt`** to place windows Niri-style instead of swapping:
+
+- `Super + Alt + drag` — drag a window onto the left, right, top or bottom
+  half of another window. The half under the cursor is highlighted and on
+  release the window takes that half;
+- `Super + Alt + click` on a window — mark it, then `Super + Alt + click`
+  the half of another window to place it there. No dragging at all, which is
+  much easier on a touchpad. Click the marked window again to unmark it;
+- dropping on empty space or on the same window does nothing;
+- only one window is marked at a time;
+- a floating or pseudo-tiled window can be placed too: it becomes a normal
+  tile, so its old floating/pseudo size is dropped. Floating and fullscreen
+  windows cannot be *targets*, and a fullscreen window is ignored until you
+  leave fullscreen;
+- the target is the window under the cursor, so splits work across monitors,
+  and the marked window may even live on another desktop;
+- on a monocle desktop use the keyboard workflow below: the tree changes
+  but nothing is visible until you leave monocle, and the notification says
+  so (the mouse cannot target a different window when all of them overlap);
+- if the drag is aborted, the preselection is cancelled.
+
+`Super + Z + click` (or any letter plus a mouse button) cannot be bound in
+sxhkd: a mouse chord only accepts real modifier keys. `Super + Alt` is used
+because it is the same prefix as the keyboard split keys below.
 
 The same result from the keyboard:
 
@@ -392,7 +418,8 @@ The same result from the keyboard:
 Example: mark a small window, focus the large window on the left, press
 `Super + Alt + K` (top half), then `Super + Alt + Enter`. The large window's
 area is split: the small window takes the top half, the large one the bottom
-half.
+half. Marking a second window drops the mark from the first one, so the
+marked window is always the one you marked last.
 
 Scripts: `~/.local/bin/bspwm-drag-split` (mouse and touchpad) and
 `~/.local/bin/bspwm-split` (keyboard, also supports `status` and `--help`).

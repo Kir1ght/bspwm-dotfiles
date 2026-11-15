@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
-# Niri-style window placement for bspwm: drag-to-split and click-to-place.
+# Niri-style split placement for bspwm (mouse and touchpad).
 #
-# Bound to Super + left mouse button (see config/sxhkd/sxhkdrc):
+# Bound to Super + Alt + left mouse button (see config/sxhkd/sxhkdrc).
+# Plain Super + mouse keeps the stock bspwm behaviour:
 #
-#   drag  a tiled window over another one — the half under the cursor is
-#         highlighted and, on release, the dragged window is inserted there
-#         instead of the two windows swapping places;
-#   click a tiled window with Super — mark it (great on a touchpad: no
-#         dragging needed), then Super-click the half of another window to
-#         place it there; clicking the marked window again unmarks it.
+#   Super + left drag    move a floating window, swap two tiled windows
+#   Super + middle drag  resize a tiled window by the shared split border
+#   Super + right drag   resize a tiled window by the nearest corner
 #
-# Dropping on empty space or on the window itself does nothing. Floating
-# windows keep moving with Super + drag, fullscreen windows are ignored.
+# With the extra Alt modifier:
+#
+#   drag  a window onto a half of another window — the half under the cursor
+#         is highlighted and, on release, the dragged window is inserted
+#         there instead of the two windows swapping places;
+#   click a window to mark it, then click a half of another window to place
+#         it there (no dragging needed, which is much easier on a touchpad);
+#         click the marked window again to unmark it.
+#
+# Only tiled and pseudo-tiled windows can be split; floating windows are
+# moved with plain Super+drag. A floating or pseudo-tiled source becomes a
+# normal tile when it is placed, so its old floating/pseudo size is dropped.
+# Floating and fullscreen windows are never used as targets, and fullscreen
+# sources are ignored. A missing neighbour is not a problem: the target is
+# whatever is under the cursor.
 #
 # The same result is available from the keyboard through bspwm-split:
 # Super+Alt+M (mark) -> Super+Alt+H/J/K/L (half) -> Super+Alt+Enter (apply).
@@ -55,30 +66,44 @@ button1_down() {
 }
 
 pointer_xy() {
-    xdotool getmouselocation --shell 2>/dev/null \
-        | sed -n 's/^X=\([-0-9]*\)$/\1/p; s/^Y=\([-0-9]*\)$/\1/p' \
-        | paste -sd' ' -
+    local key value px="" py=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            X) px=$value ;;
+            Y) py=$value ;;
+        esac
+    done < <(xdotool getmouselocation --shell 2>/dev/null)
+    [ -n "$px" ] && [ -n "$py" ] || return 1
+    printf '%s %s\n' "$px" "$py"
 }
 
 node_state() {
     "$BSPC" query -T -n "$1" 2>/dev/null \
-        | python3 -c 'import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-print((d.get("client") or {}).get("state", ""))' 2>/dev/null
+        | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -n1
 }
 
 node_rect() {
     "$BSPC" query -T -n "$1" 2>/dev/null \
-        | python3 -c 'import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-r = d.get("rectangle") or {}
-print(r.get("x", 0), r.get("y", 0), r.get("width", 0), r.get("height", 0))' 2>/dev/null
+        | sed -n 's/.*"rectangle":{"x":\(-\{0,1\}[0-9]*\),"y":\(-\{0,1\}[0-9]*\),"width":\([0-9]*\),"height":\([0-9]*\)}.*/\1 \2 \3 \4/p' \
+        | head -n1
+}
+
+node_exists() {
+    "$BSPC" query -T -n "$1" >/dev/null 2>&1
+}
+
+is_tiled_state() {
+    case "${1:-}" in
+        tiled|pseudo_tiled) return 0 ;;
+    esac
+    return 1
+}
+
+desktop_layout_of_node() {
+    local d
+    d=$("$BSPC" query -D -n "$1" 2>/dev/null) || return 1
+    "$BSPC" query -T -d "$d" 2>/dev/null \
+        | grep -o '"layout":"[^"]*"' | head -n1 | cut -d'"' -f4
 }
 
 # Which half of node $1 is closest to screen coordinates $2 $3 (west/east/
@@ -102,15 +127,54 @@ half_at() {
     fi
 }
 
-place_into() {   # $1 = window to move, $2 = target window, $3 = half
-    "$BSPC" node "$1" -t tiled >/dev/null 2>&1
-    if "$BSPC" node "$2" -p "$3" >/dev/null 2>&1 \
-       && "$BSPC" node "$1" -n "$2" >/dev/null 2>&1; then
-        "$BSPC" node "$1" -g marked=off >/dev/null 2>&1 || true
+target=""
+dir=""
+
+clear_presel() {
+    if [ -n "${target:-}" ]; then
+        "$BSPC" node "$target" -p cancel >/dev/null 2>&1 || true
+    fi
+    target=""
+    dir=""
+}
+
+# Cancel our own preselection if the script is interrupted mid-drag.
+cleanup() {
+    clear_presel
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+# Move $1 into the $3 half of $2. Re-checks both nodes, because a window may
+# have been closed or moved while the pointer was held down.
+place_into() {
+    local src=$1 tgt=$2 half=$3
+    node_exists "$src" || return 1
+    node_exists "$tgt" || return 1
+    is_tiled_state "$(node_state "$tgt")" || return 1
+
+    # A floating/pseudo-tiled source would keep its old geometry; converting
+    # it to a normal tile is what makes the split visible. bspwm exits with
+    # status 1 when the node is already tiled, which is not an error.
+    "$BSPC" node "$src" -t tiled >/dev/null 2>&1 || true
+    if "$BSPC" node "$tgt" -p "$half" >/dev/null 2>&1 \
+       && "$BSPC" node "$src" -n "$tgt" >/dev/null 2>&1; then
+        "$BSPC" node "$src" -g marked=off >/dev/null 2>&1 || true
         return 0
     fi
-    "$BSPC" node "$2" -p cancel >/dev/null 2>&1 || true
+    "$BSPC" node "$tgt" -p cancel >/dev/null 2>&1 || true
     return 1
+}
+
+say_placed() {
+    local half=$1 node=${2:-} l=""
+    [ -n "$node" ] && l=$(desktop_layout_of_node "$node")
+    if [ "$l" = monocle ]; then
+        say "Window placed" "Leave monocle to see the split"
+    else
+        say "Window placed" "Split into the $half half"
+    fi
 }
 
 command -v "$BSPC" >/dev/null 2>&1 || exit 0
@@ -123,26 +187,22 @@ start=$("$BSPC" query -N -n pointed 2>/dev/null) || exit 0
 state=$(node_state "$start")
 # Receptacles and other non-client nodes are left alone.
 [ -n "$state" ] || exit 0
+# Fullscreen windows cover everything and are not a split candidate.
 [ "$state" = "fullscreen" ] && exit 0
 
-read -r start_x start_y <<<"$(pointer_xy)"
-[ -n "${start_x:-}" ] && [ -n "${start_y:-}" ] || exit 0
-prev_x=$start_x
-prev_y=$start_y
-moved=0
-target=""
-dir=""
+start_pos=$(pointer_xy) || exit 0
+read -r start_x start_y <<<"$start_pos"
 
-clear_presel() {
-    if [ -n "$target" ]; then
-        "$BSPC" node "$target" -p cancel >/dev/null 2>&1
-    fi
-    target=""
-    dir=""
-}
+moved=0
+last_node=""
+last_state=""
 
 while button1_down; do
-    read -r px py <<<"$(pointer_xy)"
+    if ! pos=$(pointer_xy); then
+        sleep "$POLL"
+        continue
+    fi
+    read -r px py <<<"$pos"
 
     if [ "$moved" -eq 0 ]; then
         dx=$((px - start_x))
@@ -152,28 +212,30 @@ while button1_down; do
         fi
     fi
 
-    if [ "$moved" -eq 0 ]; then
-        sleep "$POLL"
-        continue
-    fi
-
-    if [ "$state" = "floating" ]; then
-        if [ "$px" != "$prev_x" ] || [ "$py" != "$prev_y" ]; then
-            "$BSPC" node "$start" -v $((px - prev_x)) $((py - prev_y)) >/dev/null 2>&1
-        fi
-    else
+    if [ "$moved" -eq 1 ]; then
         current=$("$BSPC" query -N -n pointed 2>/dev/null)
         if [ -z "$current" ] || [ "$current" = "$start" ]; then
             clear_presel
+            last_node=""
         else
-            half=$(half_at "$current" "$px" "$py")
-            if [ -n "$half" ]; then
-                if [ "$current" != "$target" ] || [ "$half" != "$dir" ]; then
-                    clear_presel
-                    if "$BSPC" node "$current" -p "$half" >/dev/null 2>&1; then
-                        target=$current
-                        dir=$half
+            # Cache the state of the window under the cursor: it changes only
+            # when the cursor crosses a window boundary.
+            if [ "$current" != "$last_node" ]; then
+                last_state=$(node_state "$current")
+                last_node=$current
+            fi
+            if is_tiled_state "$last_state"; then
+                half=$(half_at "$current" "$px" "$py")
+                if [ -n "$half" ]; then
+                    if [ "$current" != "$target" ] || [ "$half" != "$dir" ]; then
+                        clear_presel
+                        if "$BSPC" node "$current" -p "$half" >/dev/null 2>&1; then
+                            target=$current
+                            dir=$half
+                        fi
                     fi
+                else
+                    clear_presel
                 fi
             else
                 clear_presel
@@ -181,43 +243,72 @@ while button1_down; do
         fi
     fi
 
-    prev_x=$px
-    prev_y=$py
     sleep "$POLL"
 done
+
+pos=$(pointer_xy) || pos="$start_pos"
+read -r end_x end_y <<<"$pos"
+
+# A very fast drag can end before the first poll. The button is already up, so
+# rebuild the target from the release point instead of treating it as a click.
+if [ "$moved" -eq 0 ]; then
+    dx=$((end_x - start_x))
+    dy=$((end_y - start_y))
+    if [ $((dx * dx + dy * dy)) -gt $((DRAG_THRESHOLD * DRAG_THRESHOLD)) ]; then
+        current=$("$BSPC" query -N -n pointed 2>/dev/null)
+        if [ -n "$current" ] && [ "$current" != "$start" ] \
+           && is_tiled_state "$(node_state "$current")"; then
+            half=$(half_at "$current" "$end_x" "$end_y")
+            if [ -n "$half" ] && place_into "$start" "$current" "$half"; then
+                say_placed "$half" "$current"
+            fi
+        fi
+        exit 0
+    fi
+fi
 
 # A click without movement: mark the window, or drop the marked window into
 # the clicked half (much easier than dragging on a touchpad).
 if [ "$moved" -eq 0 ]; then
-    [ "$state" = "floating" ] && exit 0
-    read -r px py <<<"$(pointer_xy)"
-    marked=$("$BSPC" query -N -n .marked 2>/dev/null | head -n1)
+    marked_all=$("$BSPC" query -N -n .marked 2>/dev/null)
 
-    if [ -n "$marked" ] && [ "$marked" != "$start" ]; then
-        half=$(half_at "$start" "$px" "$py")
+    # Clicking the marked window itself removes the mark.
+    if printf '%s\n' "$marked_all" | grep -qx "$start"; then
+        "$BSPC" node "$start" -g marked=off >/dev/null 2>&1 || true
+        say "Mark removed" "Nothing will be moved"
+        exit 0
+    fi
+
+    marked=$(printf '%s\n' "$marked_all" | head -n1)
+    if [ -n "$marked" ]; then
+        if ! is_tiled_state "$state"; then
+            say "Cannot split this window" "Click a tiled window to place the marked one"
+            exit 0
+        fi
+        half=$(half_at "$start" "$end_x" "$end_y")
         if [ -n "$half" ] && place_into "$marked" "$start" "$half"; then
-            say "Window placed" "Into the $half half"
+            say_placed "$half" "$start"
         else
             say "Could not place the window" "Try another half or press Super+Alt+C"
         fi
         exit 0
     fi
 
+    # Only one window can be marked at a time: a stale mark on another window
+    # would otherwise win over the window the user just clicked.
+    for m in $marked_all; do
+        "$BSPC" node "$m" -g marked=off >/dev/null 2>&1 || true
+    done
     if "$BSPC" node "$start" -g marked >/dev/null 2>&1; then
-        if [ "$("$BSPC" query -N -n .marked 2>/dev/null | head -n1)" = "$start" ]; then
-            say "Window marked" "Super-click another window to place it"
-        else
-            say "Mark removed"
-        fi
+        say "Window marked" "Super+Alt+click a half of another window"
     fi
     exit 0
 fi
 
-[ "$state" = "floating" ] && exit 0
 [ -n "$target" ] || exit 0
 
 if place_into "$start" "$target" "$dir"; then
-    say "Window placed" "Split into the $dir half"
+    say_placed "$dir" "$target"
 else
     clear_presel
 fi

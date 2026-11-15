@@ -34,7 +34,11 @@ xsetroot -cursor_name left_ptr
 bspc config gapless_monocle false
 bspc config window_gap 8
 
-# moving floating windows and resize them with mouse, hold alt key
+# Native bspwm pointer actions (hold Super): move floating windows / swap
+# tiled ones with the left button, resize with the middle and right buttons.
+# Tiled resize changes the border shared with a neighbour; a window that fills
+# the monitor has nothing to resize against — make it pseudo-tiled to resize
+# it freely. Niri-style split placement lives on Super + Alt + left button.
 bspc config pointer_modifier mod4
 bspc config pointer_action1 move
 bspc config pointer_action2 resize_side
