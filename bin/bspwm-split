@@ -79,6 +79,8 @@ case "${1:-}" in
             die "У цели нет половинки" "Сначала Super+Alt+H/J/K/L"
         fi
 
+        # A floating or fullscreen source would stay outside the tiling tree.
+        "$BSPC" node "$marked" -t tiled >/dev/null 2>&1 || true
         "$BSPC" node "$marked" -n focused || die "Could not move the marked window"
         "$BSPC" node "$marked" -g marked=off >/dev/null 2>&1 || true
         say "Окно вставлено" "В выбранную половинку"
