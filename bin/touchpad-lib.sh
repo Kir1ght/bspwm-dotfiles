@@ -31,7 +31,9 @@ tp_read_devices() {
     local id name state
     while IFS=$'\t' read -r id name state; do
         [ -n "$id" ] || continue
-        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        # Trim without spawning sed for every device.
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
         TP_DEV_IDS+=("$id")
         TP_DEV_NAMES+=("$name")
         TP_DEV_STATES+=("$state")
@@ -43,11 +45,13 @@ tp_read_devices() {
 # Sets: TP_BASES
 tp_compute_bases() {
     TP_BASES=()
-    local name base
+    local name base lower
     for name in "${TP_DEV_NAMES[@]}"; do
-        printf '%s' "$name" | grep -qi 'touchpad' || continue
-        base=$(printf '%s' "$name" \
-            | sed -E 's/[[:space:]]*[Tt][Oo][Uu][Cc][Hh][Pp][Aa][Dd][[:space:]]*$//')
+        lower=${name,,}
+        [[ $lower == *touchpad* ]] || continue
+        # Drop a trailing "Touchpad" (any letter case) and the space before it.
+        base=${name%[Tt][Oo][Uu][Cc][Hh][Pp][Aa][Dd]}
+        base=${base% }
         [ -n "$base" ] && TP_BASES+=("$base")
     done
 }
@@ -152,17 +156,26 @@ tp_kernel_mouse_present() {
 # `touchegg --daemon` (two argv entries) and must be left alone; the client is
 # the process whose argv is exactly one element ending in "touchegg".
 tp_touchegg_client_pids() {
-    local path pid cmd
-    for path in "$TP_PROC_ROOT"/[0-9]*; do
-        [ -O "$path" ] || continue
-        [ -r "$path/cmdline" ] || continue
-        cmd=$(tr '\0' '\n' < "$path/cmdline" 2>/dev/null) || continue
+    local pid cmd candidates
+    if [ "$TP_PROC_ROOT" = /proc ] && command -v pidof >/dev/null 2>&1; then
+        # C helper: much cheaper than a shell loop over every PID.
+        candidates=$(pidof touchegg 2>/dev/null) || return 0
+    elif [ "$TP_PROC_ROOT" = /proc ] && command -v pgrep >/dev/null 2>&1; then
+        candidates=$(pgrep -x touchegg 2>/dev/null) || return 0
+    else
+        # Fixture path (tests): walk the given proc root.
+        candidates=$(printf '%s\n' "$TP_PROC_ROOT"/[0-9]* | sed 's#.*/##')
+    fi
+
+    for pid in $candidates; do
+        [ "$pid" = "$$" ] && continue
+        [ -O "$TP_PROC_ROOT/$pid" ] || continue
+        [ -r "$TP_PROC_ROOT/$pid/cmdline" ] || continue
+        cmd=$(tr '\0' '\n' < "$TP_PROC_ROOT/$pid/cmdline" 2>/dev/null) || continue
         # More than one argument: daemon or something else.
         case $cmd in *$'\n'*) continue ;; esac
         [ -n "$cmd" ] || continue
         [ "${cmd##*/}" = touchegg ] || continue
-        pid=${path##*/}
-        [ "$pid" = "$$" ] && continue
         printf '%s\n' "$pid"
     done
 }
