@@ -25,7 +25,7 @@
 # whatever is under the cursor.
 #
 # The same result is available from the keyboard through bspwm-split:
-# Super+Alt+M (mark) -> Super+Alt+H/J/K/L (half) -> Super+Alt+Enter (apply).
+# Super+Alt+M (mark) -> Super+Alt+H/J/K/L (place in that half).
 
 set -u
 

@@ -6,11 +6,13 @@
 #
 #   1. mark the window you want to move        (Super+Alt+M)
 #   2. focus the window that should be split  (usual focus keys)
-#   3. preselect one half of the target        (Super+Alt+H/J/K/L)
-#   4. drop the marked window into that half   (Super+Alt+Enter)
+#   3. press the half of the target            (Super+Alt+H/J/K/L)
 #
-# Cancel a preselection with Super+Alt+C. Only one window is marked at a time:
-# marking another window drops the previous mark.
+# The marked window is placed immediately, so there is no preview to confirm
+# and no extra key to press. Marking another window drops the previous mark.
+#
+# Super+Alt+C cancels a preselection left over from the mouse workflow or a
+# manual `bspc node -p`; the keyboard flow never leaves one behind.
 #
 # The mouse/touchpad equivalent is bspwm-drag-split (Super+Alt+click/drag).
 
@@ -36,20 +38,21 @@ Usage: bspwm-split COMMAND
 
 Commands:
   mark                 mark or unmark the focused window
-  left|right|up|down   preselect a half of the focused window
-  apply                put the marked window into the preselected half
-  cancel               cancel the preselection
+  left|right|up|down   place the marked window into that half of the focused window
+  apply                apply a pending preselection, if any (advanced)
+  cancel               cancel a pending preselection
   status               show the current mark and preselection
 
 Default keys:
-  Super+Alt+M          mark/unmark
-  Super+Alt+H/J/K/L    left/down/up/right
-  Super+Alt+Enter      apply
-  Super+Alt+C          cancel
+  Super+Alt+M          mark/unmark the window to move
+  Super+Alt+H/J/K/L    place it into the left/down/up/right half of the target
+  Super+Alt+C          cancel a pending preselection
 
-Only tiled and pseudo-tiled windows can be split (a floating marked window is
-turned into a normal tile when it is applied). Fullscreen windows must leave
-fullscreen first.
+Mark the window you want to move, focus the target window, then press a
+direction. The marked window is placed immediately: there is no preview to
+confirm. Only tiled and pseudo-tiled targets can be split (a floating marked
+window is turned into a normal tile when it is placed). Fullscreen windows
+must leave fullscreen first.
 EOF
 }
 
@@ -63,11 +66,15 @@ layout_of() {
         | grep -o '"layout":"[^"]*"' | head -n1 | cut -d'"' -f4
 }
 
-require_tiled() {
+is_tiled() {
     case "$(state_of "$1")" in
         tiled|pseudo_tiled) return 0 ;;
     esac
-    die "Focus a tiled window" "Floating and fullscreen windows cannot be split"
+    return 1
+}
+
+require_tiled() {
+    is_tiled "$1" || die "Focus a tiled window" "Floating and fullscreen windows cannot be split"
 }
 
 clear_marks_except() {
@@ -103,20 +110,49 @@ case "${1:-}" in
             down)  dir=south ;;
         esac
         focused=$("$BSPC" query -N -n focused) || die "No focused window"
+        marked=$("$BSPC" query -N -n .marked 2>/dev/null | head -n1)
+
+        # Refuse before touching the tree: a half with nothing to place would
+        # just leave an empty preview and look like a broken layout.
+        [[ -n "$marked" ]] || die "No marked window" "Press Super+Alt+M first"
+        [[ "$marked" != "$focused" ]] \
+            || die "The marked window is focused" "Focus the target window first"
         require_tiled "$focused"
-        "$BSPC" node "$focused" -p "$dir" || die "Could not preselect the $1 half"
-        say "Half: $1" "Super+Alt+Enter to insert the marked window"
+
+        # A floating/pseudo-tiled source would keep its old geometry.
+        "$BSPC" node "$marked" -t tiled >/dev/null 2>&1 || true
+        if "$BSPC" node "$focused" -p "$dir" >/dev/null 2>&1 \
+           && "$BSPC" node "$marked" -n "$focused" >/dev/null 2>&1; then
+            "$BSPC" node "$marked" -g marked=off >/dev/null 2>&1 || true
+            if [ "$(layout_of)" = "monocle" ]; then
+                say "Window placed" "Leave monocle to see the split"
+            else
+                say "Window placed" "Split into the $1 half"
+            fi
+        else
+            "$BSPC" node "$focused" -p cancel >/dev/null 2>&1 || true
+            die "Could not place the window" "Try another half"
+        fi
         ;;
     apply)
         focused=$("$BSPC" query -N -n focused) || die "No focused window"
         marked=$("$BSPC" query -N -n .marked | head -n1)
 
-        [[ -n "$marked" ]] || die "No marked window" "Press Super+Alt+M first"
-        [[ "$marked" != "$focused" ]] || die "The marked window is focused" "Focus the target window first"
-        require_tiled "$focused"
+        # `apply` is only for a preselection set manually or by the mouse
+        # preview. Never leave it behind on an error: the target would stay
+        # shrunk to the half and look like a broken layout.
+        cancel_presel() { "$BSPC" node "$focused" -p cancel >/dev/null 2>&1 || true; }
+
+        [[ -n "$marked" ]] || { cancel_presel; die "No marked window" "Press Super+Alt+M first"; }
+        [[ "$marked" != "$focused" ]] \
+            || { cancel_presel; die "The marked window is focused" "Focus the target window first"; }
+        if ! is_tiled "$focused"; then
+            cancel_presel
+            die "Focus a tiled window" "Floating and fullscreen windows cannot be split"
+        fi
 
         if "$BSPC" query -T -n "$focused" | grep -q '"presel":null'; then
-            die "Target has no preselection" "Press Super+Alt+H/J/K/L first"
+            die "Target has no preselection" "Nothing to apply"
         fi
 
         # A floating/pseudo-tiled source would keep its old geometry.

@@ -406,20 +406,22 @@ Hold **`Super + Alt`** to place windows Niri-style instead of swapping:
 sxhkd: a mouse chord only accepts real modifier keys. `Super + Alt` is used
 because it is the same prefix as the keyboard split keys below.
 
-The same result from the keyboard:
+The same result from the keyboard — mark the window to move, focus the
+target, and press the half. The window is placed immediately, so there is no
+preview to confirm and no extra key to press:
 
 1. `Super + Alt + M` — mark the window you want to move.
 2. Focus the target window with the usual focus keys.
-3. `Super + Alt + H/J/K/L` — choose a half of the target:
-   left / bottom / top / right.
-4. `Super + Alt + Enter` — insert the marked window into that half.
-5. `Super + Alt + C` — cancel the selected half.
+3. `Super + Alt + H/J/K/L` — place the marked window into the left / bottom /
+   top / right half of the target.
+4. `Super + Alt + C` — cancel a pending preselection left over from the mouse
+   or a manual `bspc node -p`; the keyboard flow normally never leaves one.
 
 Example: mark a small window, focus the large window on the left, press
-`Super + Alt + K` (top half), then `Super + Alt + Enter`. The large window's
-area is split: the small window takes the top half, the large one the bottom
-half. Marking a second window drops the mark from the first one, so the
-marked window is always the one you marked last.
+`Super + Alt + K` (top half), and the large window's area is split right
+away: the small window takes the top half, the large one the bottom half.
+Marking a second window drops the mark from the first one, so the marked
+window is always the one you marked last.
 
 Scripts: `~/.local/bin/bspwm-drag-split` (mouse and touchpad) and
 `~/.local/bin/bspwm-split` (keyboard, also supports `status` and `--help`).
