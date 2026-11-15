@@ -3,12 +3,14 @@
 # Works with USB, Bluetooth and dongles. Ignores the touchpad's internal
 # "Mouse" companion device and virtual core pointers.
 #
-# Disable automation:  pkill -f '[/]home/kiri/.local/bin/touchpad-when-mouse.sh'
+# Disable automation:  touchpad-autoswitch off   (Super+Shift+U)
+#   or:               pkill -f '[/]home/kiri/.local/bin/touchpad-when-mouse.sh'
 # Enable touchpad manually:  /usr/sbin/xinput enable "UNIW0001:00 093A:0255 Touchpad"
 
 XINPUT=/usr/sbin/xinput
 
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/touchpad-when-mouse.log"
+OFF_FLAG="${XDG_STATE_HOME:-$HOME/.local/state}/touchpad-when-mouse.off"
 mkdir -p "$(dirname "$LOG")"
 exec >>"$LOG" 2>&1
 
@@ -51,6 +53,13 @@ while :; do
 
     # XInput may not be ready yet during early bspwm startup.
     if [ "${#TP_IDS[@]}" -eq 0 ]; then
+        sleep 2
+        continue
+    fi
+
+    # Manual override: `touchpad-autoswitch off` creates this flag.
+    if [ -f "$OFF_FLAG" ]; then
+        for id in "${TP_IDS[@]}"; do "$XINPUT" enable "$id" 2>/dev/null; done
         sleep 2
         continue
     fi

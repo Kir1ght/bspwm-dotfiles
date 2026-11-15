@@ -243,3 +243,7 @@ super + ctrl + {button4,button5}
 # Focus previous / next window on desktop with mouse wheel
 super + shift + {button4,button5}
     bspc node -f {prev.local,next.local}
+
+# Toggle: touchpad off while a mouse is connected <-> touchpad always on
+super + shift + u
+    ~/.local/bin/touchpad-autoswitch toggle
