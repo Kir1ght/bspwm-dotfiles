@@ -188,6 +188,7 @@ before copying.
 | `Super + Shift + H/J/K/L` | swap windows |
 | `Super + Ctrl + H/J/K/L` | resize the window |
 | `Super + Ctrl + T` | pseudo-tiling: keep size / return to a normal tile |
+| `Super + drag / click` | split: drag a window onto a half, or click to mark and place |
 | `Alt + Shift` | us/ru layout |
 | `Ctrl + Shift + T` | random wallpaper |
 | `Ctrl + Alt + T` | choose a wallpaper |
@@ -366,8 +367,20 @@ Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:
 
 ### 🪟 Niri-style layout
 
-bspwm has no drag-to-split: if you drag a tiled window onto another, they
-simply swap. You can get the same result from the keyboard:
+bspwm has no native drag-to-split. Instead of swapping two windows, **drag a
+window onto a half of another one**: the half under the cursor is highlighted,
+and on release the dragged window takes that half.
+
+- `Super + drag` — drag a tiled window onto another and drop it on the left,
+  right, top, or bottom half;
+- `Super + click` on a window — mark it, then `Super + click` the half of
+  another window to place it there. No dragging at all, which is much easier
+  on a touchpad. Click the marked window again to unmark it;
+- dropping on empty space or on the window itself does nothing: the old
+  "swap two windows" behaviour is gone;
+- floating windows still move with `Super + drag`.
+
+The same result from the keyboard:
 
 1. `Super + Alt + M` — mark the window you want to move.
 2. Focus the target window with the usual focus keys.
@@ -381,7 +394,8 @@ Example: mark a small window, focus the large window on the left, press
 area is split: the small window takes the top half, the large one the bottom
 half.
 
-Script: `~/.local/bin/bspwm-split` (also supports `status` and `--help`).
+Scripts: `~/.local/bin/bspwm-drag-split` (mouse and touchpad) and
+`~/.local/bin/bspwm-split` (keyboard, also supports `status` and `--help`).
 
 ## 📝 Notes
 

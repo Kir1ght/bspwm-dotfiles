@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# Niri-style window placement for bspwm: drag-to-split and click-to-place.
+#
+# Bound to Super + left mouse button (see config/sxhkd/sxhkdrc):
+#
+#   drag  a tiled window over another one — the half under the cursor is
+#         highlighted and, on release, the dragged window is inserted there
+#         instead of the two windows swapping places;
+#   click a tiled window with Super — mark it (great on a touchpad: no
+#         dragging needed), then Super-click the half of another window to
+#         place it there; clicking the marked window again unmarks it.
+#
+# Dropping on empty space or on the window itself does nothing. Floating
+# windows keep moving with Super + drag, fullscreen windows are ignored.
+#
+# The same result is available from the keyboard through bspwm-split:
+# Super+Alt+M (mark) -> Super+Alt+H/J/K/L (half) -> Super+Alt+Enter (apply).
+
+set -u
+
+BSPC=${BSPC:-bspc}
+POLL=${POLL:-0.04}
+DRAG_THRESHOLD=${DRAG_THRESHOLD:-9}   # pixels before a click becomes a drag
+
+say() {
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -a bspwm-drag -t 1400 "$1" "${2:-}" >/dev/null 2>&1 || true
+}
+
+pointer_ids() {
+    xinput list --short 2>/dev/null \
+        | sed -n 's/.*id=\([0-9]\+\).*\[slave *pointer.*/\1/p'
+}
+
+# Button state of the device that started the drag. Checking every pointer on
+# every poll would spawn too many processes; once one device reports a pressed
+# button, only that device is polled until it is released.
+down_device=""
+
+button1_down() {
+    local id
+    if [ -n "$down_device" ]; then
+        xinput --query-state "$down_device" 2>/dev/null \
+            | grep -q 'button\[1\]=down'
+        return
+    fi
+    for id in $(pointer_ids); do
+        if xinput --query-state "$id" 2>/dev/null \
+            | grep -q 'button\[1\]=down'; then
+            down_device=$id
+            return 0
+        fi
+    done
+    return 1
+}
+
+pointer_xy() {
+    xdotool getmouselocation --shell 2>/dev/null \
+        | sed -n 's/^X=\([-0-9]*\)$/\1/p; s/^Y=\([-0-9]*\)$/\1/p' \
+        | paste -sd' ' -
+}
+
+node_state() {
+    "$BSPC" query -T -n "$1" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+print((d.get("client") or {}).get("state", ""))' 2>/dev/null
+}
+
+node_rect() {
+    "$BSPC" query -T -n "$1" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+r = d.get("rectangle") or {}
+print(r.get("x", 0), r.get("y", 0), r.get("width", 0), r.get("height", 0))' 2>/dev/null
+}
+
+# Which half of node $1 is closest to screen coordinates $2 $3 (west/east/
+# north/south). Prints nothing when the node geometry cannot be read.
+half_at() {
+    local node=$1 px=$2 py=$3 gx gy gw gh cx cy ax ay abx aby
+    read -r gx gy gw gh <<<"$(node_rect "$node")"
+    [ -n "${gw:-}" ] && [ "${gw:-0}" -gt 0 ] && [ "${gh:-0}" -gt 0 ] || return 0
+    cx=$((px - gx))
+    cy=$((py - gy))
+    # Compare the horizontal and vertical offsets by cross-multiplying, so no
+    # floating point math is needed.
+    ax=$(((2 * cx - gw) * gh))
+    ay=$(((2 * cy - gh) * gw))
+    abx=${ax#-}
+    aby=${ay#-}
+    if [ "$abx" -ge "$aby" ]; then
+        if [ "$ax" -lt 0 ]; then echo west; else echo east; fi
+    else
+        if [ "$ay" -lt 0 ]; then echo north; else echo south; fi
+    fi
+}
+
+place_into() {   # $1 = window to move, $2 = target window, $3 = half
+    "$BSPC" node "$1" -t tiled >/dev/null 2>&1
+    if "$BSPC" node "$2" -p "$3" >/dev/null 2>&1 \
+       && "$BSPC" node "$1" -n "$2" >/dev/null 2>&1; then
+        "$BSPC" node "$1" -g marked=off >/dev/null 2>&1 || true
+        return 0
+    fi
+    "$BSPC" node "$2" -p cancel >/dev/null 2>&1 || true
+    return 1
+}
+
+command -v "$BSPC" >/dev/null 2>&1 || exit 0
+command -v xdotool >/dev/null 2>&1 || exit 0
+command -v xinput >/dev/null 2>&1 || exit 0
+
+start=$("$BSPC" query -N -n pointed 2>/dev/null) || exit 0
+[ -n "$start" ] || exit 0
+
+state=$(node_state "$start")
+# Receptacles and other non-client nodes are left alone.
+[ -n "$state" ] || exit 0
+[ "$state" = "fullscreen" ] && exit 0
+
+read -r start_x start_y <<<"$(pointer_xy)"
+[ -n "${start_x:-}" ] && [ -n "${start_y:-}" ] || exit 0
+prev_x=$start_x
+prev_y=$start_y
+moved=0
+target=""
+dir=""
+
+clear_presel() {
+    if [ -n "$target" ]; then
+        "$BSPC" node "$target" -p cancel >/dev/null 2>&1
+    fi
+    target=""
+    dir=""
+}
+
+while button1_down; do
+    read -r px py <<<"$(pointer_xy)"
+
+    if [ "$moved" -eq 0 ]; then
+        dx=$((px - start_x))
+        dy=$((py - start_y))
+        if [ $((dx * dx + dy * dy)) -gt $((DRAG_THRESHOLD * DRAG_THRESHOLD)) ]; then
+            moved=1
+        fi
+    fi
+
+    if [ "$moved" -eq 0 ]; then
+        sleep "$POLL"
+        continue
+    fi
+
+    if [ "$state" = "floating" ]; then
+        if [ "$px" != "$prev_x" ] || [ "$py" != "$prev_y" ]; then
+            "$BSPC" node "$start" -v $((px - prev_x)) $((py - prev_y)) >/dev/null 2>&1
+        fi
+    else
+        current=$("$BSPC" query -N -n pointed 2>/dev/null)
+        if [ -z "$current" ] || [ "$current" = "$start" ]; then
+            clear_presel
+        else
+            half=$(half_at "$current" "$px" "$py")
+            if [ -n "$half" ]; then
+                if [ "$current" != "$target" ] || [ "$half" != "$dir" ]; then
+                    clear_presel
+                    if "$BSPC" node "$current" -p "$half" >/dev/null 2>&1; then
+                        target=$current
+                        dir=$half
+                    fi
+                fi
+            else
+                clear_presel
+            fi
+        fi
+    fi
+
+    prev_x=$px
+    prev_y=$py
+    sleep "$POLL"
+done
+
+# A click without movement: mark the window, or drop the marked window into
+# the clicked half (much easier than dragging on a touchpad).
+if [ "$moved" -eq 0 ]; then
+    [ "$state" = "floating" ] && exit 0
+    read -r px py <<<"$(pointer_xy)"
+    marked=$("$BSPC" query -N -n .marked 2>/dev/null | head -n1)
+
+    if [ -n "$marked" ] && [ "$marked" != "$start" ]; then
+        half=$(half_at "$start" "$px" "$py")
+        if [ -n "$half" ] && place_into "$marked" "$start" "$half"; then
+            say "Window placed" "Into the $half half"
+        else
+            say "Could not place the window" "Try another half or press Super+Alt+C"
+        fi
+        exit 0
+    fi
+
+    if "$BSPC" node "$start" -g marked >/dev/null 2>&1; then
+        if [ "$("$BSPC" query -N -n .marked 2>/dev/null | head -n1)" = "$start" ]; then
+            say "Window marked" "Super-click another window to place it"
+        else
+            say "Mark removed"
+        fi
+    fi
+    exit 0
+fi
+
+[ "$state" = "floating" ] && exit 0
+[ -n "$target" ] || exit 0
+
+if place_into "$start" "$target" "$dir"; then
+    say "Window placed" "Split into the $dir half"
+else
+    clear_presel
+fi

@@ -241,6 +241,12 @@ super + alt + c
 super + {_,shift + ,ctrl + }{1-9}
     bspc {desktop -f,node -d,node -d --follow} '^{1-9}'
 
+# Drag a tiled window onto another to split it (Niri-style).
+# A plain Super-click marks a window; Super-click a half of another window
+# to place it there (no dragging needed on a touchpad).
+super + button1
+    ~/bin/bspwm-drag-split
+
 # Navigate workspaces with mouse wheel
 super + {button4,button5}
     bspc desktop -f {prev.local,next.local}
