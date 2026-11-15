@@ -1624,13 +1624,15 @@ def run_grid(
     on_enter: str,
     selected_row: int = 0,
     has_prev: bool = False,
+    pending: int = 0,
 ) -> tuple[str, int | None]:
     """Run the thumbnail grid.
 
-    Returns ("pick"|"save"|"apply"|"next"|"prev"|"page"|"quit"|"cancel",
-    index). All actions are plain rofi custom keys, so the window reacts
-    immediately: Enter follows the configured action, Alt+S saves only,
-    Alt+A applies, Alt+B/Alt+N change pages, Alt+G picks a page by number.
+    Returns ("pick"|"save"|"apply"|"next"|"prev"|"page"|"refresh"|"quit"|
+    "cancel", index). All actions are plain rofi custom keys, so the window
+    reacts immediately: Enter follows the configured action, Alt+S saves only,
+    Alt+A applies, Alt+B/Alt+N change pages, Alt+G picks a page by number,
+    Alt+R reloads thumbnails that finished downloading in the background.
     `selected_row` keeps the user's place when the grid reopens after a save.
     """
     clean_rofi_pid()
@@ -1664,6 +1666,8 @@ def run_grid(
         "Alt+q",
         "-kb-custom-5",
         "Alt+g",
+        "-kb-custom-7",
+        "Alt+r",
     ]
     if has_prev:
         command += ["-kb-custom-6", "Alt+b"]
@@ -1675,11 +1679,13 @@ def run_grid(
         "Alt+A — wallpaper",
         "Alt+S — save only",
     ]
+    if pending > 0:
+        parts.append(f"{pending} thumbnail(s) loading")
     if has_prev:
         parts.append("Alt+B — prev page")
     if has_next:
         parts.append("Alt+N — next page")
-    parts += ["Alt+G — go to page", "Alt+Q — quit", "Esc — search"]
+    parts += ["Alt+G — go to page", "Alt+R — reload thumbnails", "Alt+Q — quit", "Esc — search"]
     command += ["-mesg", "   ·   ".join(parts)]
 
     width, height, columns, lines, icon = grid_layout(count)
@@ -1720,6 +1726,9 @@ def run_grid(
     if result.returncode == 15 and has_prev:
         rofi_cooldown()
         return "prev", None
+    if result.returncode == 16:
+        rofi_cooldown()
+        return "refresh", None
     if result.returncode != 0:
         rofi_cooldown()
         return "cancel", None
@@ -2204,6 +2213,7 @@ def results_loop(
                 settings.on_enter,
                 selected_row,
                 has_prev=settings.page > 1,
+                pending=sum(1 for post in posts if post.id not in previews),
             )
             debug(f"grid action={action} index={index} page={settings.page}")
             if action == "next":
@@ -2219,6 +2229,21 @@ def results_loop(
                 if chosen is not None and chosen != settings.page:
                     settings.page = chosen
                     return "next"
+                continue
+            if action == "refresh":
+                # Thumbnails keep downloading in the background. Pull in the
+                # ones that already landed and wait briefly for the rest, so
+                # the grid can be reopened without flipping through pages.
+                refresh_previews(posts, previews)
+                missing = [post for post in posts if post.id not in previews]
+                if missing:
+                    previews.update(
+                        fetch_previews(
+                            missing,
+                            settings.preview_workers,
+                            budget=3.0,
+                        )
+                    )
                 continue
             if action == "quit":
                 return "quit"

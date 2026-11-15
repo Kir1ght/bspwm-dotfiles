@@ -67,15 +67,17 @@ and press Enter. It searches **Yande.re, Konachan, Danbooru, and Gelbooru**.
 - `Tab` (or `Alt + T`) shows tag suggestions: the unfinished tag is searched
   on the booru, and the post count is shown next to each suggestion. The
   selected tag is inserted into the field, so you can enter several separated
-  by spaces (`blue_archive landscape`); `Tab` on an empty input shows popular
+  by spaces (`landscape night`); `Tab` on an empty input shows popular
   tags;
-- results are shown as a thumbnail grid — scroll with the mouse or arrow keys;
+- results are shown as a thumbnail grid — scroll with the mouse or arrow keys.
+  While thumbnails are still loading, the status line shows how many are left;
 - `Enter` by default **only saves**; `Alt + A` applies the image as the
   wallpaper; `Alt + S` saves without changing the wallpaper. An applied image
   is copied to `~/Images/Wallpaper_desktop`, so you can find it later in the
   wallpaper selector;
 - `Alt + N` goes to the next page, `Alt + B` to the previous one, `Alt + G`
-  opens a page picker (or lets you type a number), `Alt + Q` quits, `Esc`
+  opens a page picker (or lets you type a number), `Alt + R` reloads
+  thumbnails that finished loading in the background, `Alt + Q` quits, `Esc`
   goes back to the search. If a page is empty, the browser returns to the
   last page with results;
 - already downloaded art is marked with `✓`;
@@ -185,6 +187,7 @@ before copying.
 | `Super + H/J/K/L` | move focus |
 | `Super + Shift + H/J/K/L` | swap windows |
 | `Super + Ctrl + H/J/K/L` | resize the window |
+| `Super + Ctrl + T` | pseudo-tiling: keep size / return to a normal tile |
 | `Alt + Shift` | us/ru layout |
 | `Ctrl + Shift + T` | random wallpaper |
 | `Ctrl + Alt + T` | choose a wallpaper |
@@ -347,9 +350,10 @@ Gestures work through `touchegg` (X11 only). The installer enables the
 | 4 fingers up | fullscreen |
 | 4 fingers down | floating mode |
 
-Directions are "natural": swipe left goes forward, right goes back. If a
-mouse is connected and the touchpad is disabled by automation, gestures do
-not work — that is expected. Enable the touchpad: `Super + Shift + U` or
+Directions are "natural": swipe left goes forward, right goes back. Gestures
+are touchpad-only: a mouse or its dongle cannot trigger them. If a mouse is
+connected and the touchpad is disabled by automation, gestures do not work —
+that is expected. Enable the touchpad: `Super + Shift + U` or
 `touchpad-autoswitch off`.
 
 Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:

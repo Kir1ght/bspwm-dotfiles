@@ -1,0 +1,24 @@
+#!/bin/bash
+# Toggle pseudo-tiling for the focused window.
+#
+# A pseudo-tiled window keeps its own size inside a tile. bspwm's own
+# "~STATE" toggle restores the *previous* state, so a floating window stays
+# floating (it just looks pseudo-tiled for a moment). This script picks the
+# target state explicitly: pseudo-tiled -> tiled, everything else ->
+# pseudo-tiled, and reports the result so the hotkey never feels "stuck".
+
+state=$(bspc query -T -n focused 2>/dev/null | grep -o '"state":"[a-z_]*"' | head -1 | cut -d'"' -f4)
+[ -n "$state" ] || exit 0
+
+if [ "$state" = "pseudo_tiled" ]; then
+    bspc node focused -t tiled
+    message="Tiled"
+else
+    bspc node focused -t pseudo_tiled
+    message="Pseudo-tiled"
+fi
+
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -t 1200 -u low -h string:x-dunst-stack-tag:bspwm-state \
+        "Window: $message" -i preferences-system-windows
+fi

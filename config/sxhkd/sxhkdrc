@@ -184,9 +184,9 @@ XF86Audio{Play,Next,Prev,Stop}
 # 5. BSPWM: WINDOW STATES & LAYOUT
 # =============================================================================
 
-# Toggle pseudo-tiled mode (Two-way toggle)
+# Toggle pseudo-tiled mode (P = Pseudo, always returns to a normal tile)
 super + ctrl + t
-    bspc node -t ~pseudo_tiled
+    ~/bin/bspwm-pseudo
 
 # Toggle fullscreen mode (F = Fullscreen)
 super + f
