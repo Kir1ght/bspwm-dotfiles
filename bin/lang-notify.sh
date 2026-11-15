@@ -16,9 +16,9 @@ POLL_INTERVAL="${LANG_NOTIFY_POLL:-0.2}"
 
 notify() {
     case "$1" in
-        us) notify-send "Язык: EN 🇺🇸" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
-        ru) notify-send "Язык: RU 🇷🇺" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
-        *)  notify-send "Язык: $1" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
+        us) notify-send "Layout: EN 🇺🇸" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
+        ru) notify-send "Layout: RU 🇷🇺" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
+        *)  notify-send "Layout: $1" -t 800 -u low -h string:x-dunst-stack-tag:lang ;;
     esac
 }
 

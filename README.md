@@ -1,403 +1,410 @@
+<p align="center">
+  <b>🇬🇧 English</b> | <a href="README.ru.md">🇷🇺 Русский</a>
+</p>
+
 <div align="center">
 
 # 🗡️ bspwm-dotfiles
 
-**Лёгкий bspwm на CachyOS: палитра из обоев, живой Polybar, rofi-апплеты
-и Anime Wall — поиск и скачивание аниме-артов с Yande.re, Konachan,
-Danbooru и Gelbooru.**
+**A lightweight bspwm setup for CachyOS: wallpaper-driven colors, a live Polybar,
+rofi applets, and Anime Wall — search and download anime art from Yande.re,
+Konachan, Danbooru, and Gelbooru.**
 
 [![Arch Linux](https://img.shields.io/badge/Arch_Linux-1793D1?style=for-the-badge&logo=arch-linux&logoColor=white)](https://archlinux.org/)
 [![CachyOS](https://img.shields.io/badge/CachyOS-00AEEF?style=for-the-badge&logo=linux&logoColor=white)](https://cachyos.org/)
 [![bspwm](https://img.shields.io/badge/bspwm-X11-8A2BE2?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/baskerville/bspwm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-F7C948?style=for-the-badge)](LICENSE)
 
-&ensp;[<kbd> <br> Установка <br> </kbd>](#-установка)&ensp;
-&ensp;[<kbd> <br> Возможности <br> </kbd>](#-возможности)&ensp;
-&ensp;[<kbd> <br> Скриншоты <br> </kbd>](#-скриншоты)&ensp;
-&ensp;[<kbd> <br> Клавиши <br> </kbd>](#-клавиши)&ensp;
-&ensp;[<kbd> <br> Обои <br> </kbd>](#-обои-и-палитра)&ensp;
+&ensp;[<kbd> <br> Installation <br> </kbd>](#-installation)&ensp;
+&ensp;[<kbd> <br> Features <br> </kbd>](#-features)&ensp;
+&ensp;[<kbd> <br> Screenshots <br> </kbd>](#-screenshots)&ensp;
+&ensp;[<kbd> <br> Keybindings <br> </kbd>](#-keybindings)&ensp;
+&ensp;[<kbd> <br> Wallpapers <br> </kbd>](#-wallpapers-and-palette)&ensp;
 
 <a href="Images/desktop.jpg">
-  <img src="Images/desktop.jpg" alt="Рабочий стол bspwm" width="100%">
+  <img src="Images/desktop.jpg" alt="bspwm desktop" width="100%">
 </a>
 
 </div>
 
-## 👋 Привет
+## 👋 Hello
 
-Это мой повседневный рабочий стол на CachyOS: **bspwm + sxhkd**, Polybar,
-picom, rofi, dunst и Alacritty. Конфиги собраны под ноутбук с
-**AMD iGPU + NVIDIA** и под обычную работу: браузер, музыка, документы,
-скриншоты и быстрый перебор обоев.
+This is my daily driver on CachyOS: **bspwm + sxhkd**, Polybar, picom, rofi,
+dunst, and Alacritty. The configs are made for a laptop with an
+**AMD iGPU + NVIDIA** and for everyday work: browser, music, documents,
+screenshots, and quick wallpaper browsing.
 
-Всё, что можно автоматизировать, автоматизировано: палитра берётся из
-текущей картинки, обои кэшируются под размер экрана, а дискретная NVIDIA
-спит, пока её не попросят через `prime-run`.
+Everything that can be automated is automated: the palette comes from the
+current image, wallpapers are cached at screen size, and the discrete NVIDIA
+GPU stays asleep until you ask for it with `prime-run`.
 
-## ✨ Возможности
+## ✨ Features
 
-### 🎨 Палитра из обоев
+### 🎨 Palette from the wallpaper
 
-`config/theme/apply.py` читает текущие обои, вытаскивает из них цвета и
-перекрашивает **Polybar, Alacritty, dunst, rofi, zathura, GTK-тему и рамки
-bspwm**. При быстром переборе применяется только последняя картинка, а
-палитра пересобирается один раз, когда вы остановились.
+`config/theme/apply.py` reads the current wallpaper, extracts colors from it,
+and recolors **Polybar, Alacritty, dunst, rofi, zathura, the GTK theme, and
+bspwm borders**. When you switch wallpapers quickly, only the last image is
+applied; the palette is rebuilt once you stop.
 
-Обои кэшируются в размере экрана, поэтому переключение не декодирует
-4K-оригинал каждый раз. Палитру можно пересобрать вручную:
+Wallpapers are cached at screen size, so switching does not decode the 4K
+original every time. You can rebuild the palette manually:
 
 ```bash
-~/.config/theme/apply.py            # по текущим обоям
-~/.config/theme/apply.py --show     # только показать цвета
+~/.config/theme/apply.py            # from the current wallpaper
+~/.config/theme/apply.py --show     # only print the colors
 ```
 
-### 🖼️ Anime Wall — браузер артов
+### 🖼️ Anime Wall — art browser
 
-`Ctrl + Alt + A` — или пункт **Anime Wall** в rofi-лаунчере (`Super + Space`).
-Открывается **поисковая строка для тегов** — сразу можно вбить, что ищешь,
-и нажать Enter. Ищет по **Yande.re, Konachan, Danbooru и Gelbooru**.
+`Ctrl + Alt + A` — or the **Anime Wall** entry in the rofi launcher
+(`Super + Space`). A **tag search field** opens right away: type what you want
+and press Enter. It searches **Yande.re, Konachan, Danbooru, and Gelbooru**.
 
-- `Enter` начинает поиск, `Alt + F` — фильтры (рейтинг, score, размер,
-  ориентация, сортировка), `Alt + P` — быстрая смена провайдера,
-  `Alt + Q` — выход;
-- `Tab` (или `Alt + T`) — подсказки тегов: недописанный тег ищется на
-  буру, рядом с каждым показывается число постов. Выбранный тег
-  подставляется в строку, так что можно набрать несколько через пробел
-  (`blue_archive landscape`); `Tab` на пустом вводе показывает популярные
-  теги;
-- результаты показываются сеткой превью — можно спокойно скроллить мышью
-  или стрелками;
-- `Enter` по умолчанию **только сохраняет**; `Alt + A` — применить как обои;
-  `Alt + S` — сохранить без смены обоев. Применённый арт копируется
-  в `~/Images/Wallpaper_desktop`, поэтому его потом можно найти в селекторе
-  обоев;
-- `Alt + N` — следующая страница, `Alt + B` — предыдущая, `Alt + G` —
-  выбрать страницу из списка (или ввести номер), `Alt + Q` — выйти,
-  `Esc` — обратно к поиску. Если страница пустая, браузер сам вернёт
-  на последнюю с результатами;
-- уже скачанные арты помечаются `✓`;
-- файлы лежат в `~/Pictures/kiri-vault/<Провайдер>/` — у каждого бора
-  своя папка;
-- сеть ограничена таймаутами, результаты и превью кэшируются, скачивание
-  идёт в фоне — интерфейс не замирает, даже если сервер недоступен.
+- `Enter` starts the search, `Alt + F` opens filters (rating, score, size,
+  orientation, sorting), `Alt + P` switches the provider quickly,
+  `Alt + Q` quits;
+- `Tab` (or `Alt + T`) shows tag suggestions: the unfinished tag is searched
+  on the booru, and the post count is shown next to each suggestion. The
+  selected tag is inserted into the field, so you can enter several separated
+  by spaces (`blue_archive landscape`); `Tab` on an empty input shows popular
+  tags;
+- results are shown as a thumbnail grid — scroll with the mouse or arrow keys;
+- `Enter` by default **only saves**; `Alt + A` applies the image as the
+  wallpaper; `Alt + S` saves without changing the wallpaper. An applied image
+  is copied to `~/Images/Wallpaper_desktop`, so you can find it later in the
+  wallpaper selector;
+- `Alt + N` goes to the next page, `Alt + B` to the previous one, `Alt + G`
+  opens a page picker (or lets you type a number), `Alt + Q` quits, `Esc`
+  goes back to the search. If a page is empty, the browser returns to the
+  last page with results;
+- already downloaded art is marked with `✓`;
+- files are stored in `~/Pictures/kiri-vault/<Provider>/` — each booru has
+  its own folder;
+- network requests have timeouts, results and thumbnails are cached, and
+  downloads run in the background — the interface does not freeze even if the
+  server is unavailable.
 
 <a href="Images/anime-wall.png">
-  <img src="Images/anime-wall.png" alt="Anime Wall — браузер аниме-артов" width="78%">
+  <img src="Images/anime-wall.png" alt="Anime Wall — anime art browser" width="78%">
 </a>
 
-### 🚀 Fastfetch с Асной
+### 🚀 Fastfetch with Asuna
 
-Логотип — не статичная картинка, а **ANSI-арт, который рендерится под размер
-терминала**. Внутри используются полублоки с градиентами, а по краям силуэта
-— брайль-точки, поэтому лицо и волосы остаются чёткими. Арт автоматически
-уменьшается, чтобы список модулей не переносился, и исчезает на слишком
-узком терминале.
+The logo is not a static image but **ANSI art rendered to fit the terminal
+size**. It uses half-blocks with gradients and braille dots along the
+silhouette edges, so the face and hair stay sharp. The art shrinks
+automatically so the module list does not wrap, and disappears on very narrow
+terminals.
 
-Дополнительно показывается модуль **`Screen`** с текущей герцовкой монитора.
-Готовый арт кэшируется в `~/.cache/fastfetch`, так что запуск мгновенный.
+A **`Screen`** module also shows the current monitor refresh rate. The
+generated art is cached in `~/.cache/fastfetch`, so startup is instant.
 
-### 🧩 Rofi-апплеты
+### 🧩 Rofi applets
 
-Всё управление собрано в rofi: обои, сеть, Bluetooth, буфер обмена,
-скриншоты, звук, микрофон, питание, раскладка и шпаргалка по клавишам.
-Темы rofi перекрашиваются вместе с остальным интерфейсом.
+Everything is controlled from rofi: wallpapers, network, Bluetooth,
+clipboard, screenshots, audio, microphone, power, keyboard layout, and the
+keybinding cheat sheet. Rofi themes are recolored together with the rest of
+the interface.
 
 ### 📊 Polybar
 
-Столы bspwm, CPU, память, температура, GPU, now-playing, погода, батарея,
-звук, сеть, раскладка и часы. `polybar-gpu` не опрашивает `nvidia-smi`,
-пока карта спит, иначе она бы просыпалась каждые несколько секунд.
+bspwm desktops, CPU, memory, temperature, GPU, now-playing, weather, battery,
+volume, network, keyboard layout, and clock. `polybar-gpu` does not query
+`nvidia-smi` while the GPU is asleep; otherwise it would wake up every few
+seconds.
 
 ### 🎮 NVIDIA runtime PM
 
-Установщик кладёт `nvidia-pm.conf`, udev-правила и включает сервисы NVIDIA,
-если в системе есть карта. В простое `runtime_status` должен быть
-`suspended`. Запуск на дискретной карте:
+The installer drops in `nvidia-pm.conf`, udev rules, and enables NVIDIA
+services if the system has a GPU. At idle, `runtime_status` should be
+`suspended`. To run something on the discrete GPU:
 
 ```bash
-prime-run <команда>
+prime-run <command>
 ```
 
-### 🎙️ Whisper и медиа
+### 🎙️ Whisper and media
 
-`Super + D` — голосовой ввод, `Super + Shift + D` — запись лекции.
-Модели Whisper не лежат в git, их скачивает `./install.sh --with-whisper`.
-Медиа-клавиши работают через `playerctl` с запасным вариантом на `mpd`.
+`Super + D` — voice typing, `Super + Shift + D` — lecture recording. Whisper
+models are not stored in git; `./install.sh --with-whisper` downloads them.
+Media keys work through `playerctl` with an `mpd` fallback.
 
-## 📸 Скриншоты
+## 📸 Screenshots
 
 | Fastfetch | Cava |
 |:---:|:---:|
-| <img src="Images/fastfetch.png" alt="Fastfetch с ANSI-артом" width="620"> | <img src="Images/cava.png" alt="Cava" width="420"> |
+| <img src="Images/fastfetch.png" alt="Fastfetch with ANSI art" width="620"> | <img src="Images/cava.png" alt="Cava" width="420"> |
 
-Экран блокировки — [`Images/Wallpaper_lockscreen/lock_screen.png`](Images/Wallpaper_lockscreen/lock_screen.png).
+Lock screen — [`Images/Wallpaper_lockscreen/lock_screen.png`](Images/Wallpaper_lockscreen/lock_screen.png).
 
-## 🛠 Установка
+## 🛠 Installation
 
 ```bash
 git clone https://github.com/Kir1ght/bspwm-dotfiles.git
 cd bspwm-dotfiles
-./install.sh --dry-run   # посмотреть план
+./install.sh --dry-run   # see the plan
 ./install.sh
 ```
 
-Одной командой:
+One command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Kir1ght/bspwm-dotfiles/main/bootstrap.sh | bash
 ```
 
-`install.sh` рассчитан на **Arch Linux и CachyOS**. Запускать его нужно от
-обычного пользователя, sudo он спросит сам. Старые конфиги перед копированием
-складываются в `~/.dotfiles-backup-*`.
+`install.sh` targets **Arch Linux and CachyOS**. Run it as a regular user; it
+will ask for sudo itself. Old configs are moved to `~/.dotfiles-backup-*`
+before copying.
 
-| Флаг | Что делает |
+| Flag | What it does |
 |---|---|
-| `--no-packages` | не ставить пакеты |
-| `--no-config` | не копировать конфиги |
-| `--no-gpu` | не трогать NVIDIA |
-| `--no-firefox` | не трогать профиль Firefox |
-| `--no-update` | не запускать `pacman -Syu` |
-| `--with-whisper` | скачать модели whisper.cpp |
-| `--with-apps` | поставить дополнительные приложения |
-| `--with-extra` | AUR-утилиты, темы и `ly` |
+| `--no-packages` | do not install packages |
+| `--no-config` | do not copy configs |
+| `--no-gpu` | do not touch NVIDIA |
+| `--no-firefox` | do not touch the Firefox profile |
+| `--no-update` | do not run `pacman -Syu` |
+| `--with-whisper` | download whisper.cpp models |
+| `--with-apps` | install optional applications |
+| `--with-extra` | AUR tools, themes, and `ly` |
 
-`Builder/install.py` делает то же самое через меню.
+`Builder/install.py` does the same through a menu.
 
-## ⌨️ Клавиши
+## ⌨️ Keybindings
 
-`Super` — это Win. Полная шпаргалка — `Super + Shift + /`, она собирается из
+`Super` is Win. The full cheat sheet is `Super + Shift + /`, generated from
 `sxhkdrc`.
 
-| Комбинация | Действие |
+| Shortcut | Action |
 |---|---|
-| `Super + T` / `W` / `E` | терминал, Firefox, Thunar |
+| `Super + T` / `W` / `E` | terminal, Firefox, Thunar |
 | `Super + Space` | rofi |
-| `Super + Q` | закрыть окно |
-| `Super + 1…9` | рабочий стол |
-| `Super + Shift + 1…9` | отправить окно на стол |
-| `Super + H/J/K/L` | фокус |
-| `Super + Shift + H/J/K/L` | поменять окна местами |
-| `Super + Ctrl + H/J/K/L` | размер окна |
-| `Alt + Shift` | раскладка us/ru |
-| `Ctrl + Shift + T` | случайные обои |
-| `Ctrl + Alt + T` | выбрать обои |
-| `Ctrl + Alt + L` | выбрать обои экрана блокировки |
-| `Ctrl + Alt + A` | Anime Wall: поиск и скачивание артов |
-| `Ctrl + Alt + R` | пересобрать палитру |
-| `Print` | скриншот области |
-| `Ctrl + Shift + L` | заблокировать экран |
-| `Super + S` | выключить экран через 2 секунды |
-| `Super + D` / `Super + Shift + D` | Whisper: ввод, запись лекции |
-| `Super + Shift + U` | тачпад: вкл/выкл автоотключение при мыши |
+| `Super + Q` | close the focused window |
+| `Super + 1…9` | switch desktop |
+| `Super + Shift + 1…9` | send the window to a desktop |
+| `Super + H/J/K/L` | move focus |
+| `Super + Shift + H/J/K/L` | swap windows |
+| `Super + Ctrl + H/J/K/L` | resize the window |
+| `Alt + Shift` | us/ru layout |
+| `Ctrl + Shift + T` | random wallpaper |
+| `Ctrl + Alt + T` | choose a wallpaper |
+| `Ctrl + Alt + L` | choose a lock screen wallpaper |
+| `Ctrl + Alt + A` | Anime Wall: search and download art |
+| `Ctrl + Alt + R` | rebuild the palette |
+| `Print` | area screenshot |
+| `Ctrl + Shift + L` | lock the screen |
+| `Super + S` | turn off the display after 2 seconds |
+| `Super + D` / `Super + Shift + D` | Whisper: typing, lecture recording |
+| `Super + Shift + U` | touchpad: toggle auto-disable while a mouse is connected |
 
-Медиа-клавиши и Fn-клавиши яркости тоже привязаны в sxhkd.
+Media keys and Fn brightness keys are also bound in sxhkd.
 
-Раскладка `us/ru` настраивается один раз за X-сессию в `bspwmrc` (и в
-`xinitrc` для startx): `setxkbmap -layout us,ru -option grp:alt_shift_toggle`.
-Перезапуск `bspwmrc` активную раскладку не сбрасывает. Если `Alt + Shift` не
-работает, проверьте, что установлен пакет `xorg-setxkbmap`.
+The `us/ru` layout is configured once per X session in `bspwmrc` (and in
+`xinitrc` for startx): `setxkbmap -layout us,ru -option grp:alt_shift_toggle`.
+Restarting `bspwmrc` does not reset the active layout. If `Alt + Shift` does
+not work, make sure the `xorg-setxkbmap` package is installed.
 
-## 🖼️ Обои и палитра
+## 🖼️ Wallpapers and palette
 
-На чистой установке ставится `Wallpaper_desktop/default.png`, пока вы не выберете
-другие обои. Дальше bspwm восстанавливает последнюю картинку из `~/.fehbg`.
+A fresh install uses `Wallpaper_desktop/default.png` until you choose another
+wallpaper. After that, bspwm restores the last image from `~/.fehbg`.
 
-Обои разделены на две библиотеки — других папок скрипты не сканируют:
+Wallpapers are split into two libraries; the scripts scan no other folders:
 
 ```text
-~/Images/Wallpaper_desktop/      рабочий стол
-~/Images/Wallpaper_lockscreen/   экран блокировки
+~/Images/Wallpaper_desktop/      desktop
+~/Images/Wallpaper_lockscreen/   lock screen
 ```
 
 ```bash
-~/bin/random_wallpaper              # случайные обои рабочего стола
-~/bin/random_wallpaper --set PATH   # конкретная картинка
-~/bin/random_wallpaper --lockscreen # случайные обои локскрина
+~/bin/random_wallpaper              # random desktop wallpaper
+~/bin/random_wallpaper --set PATH   # a specific image
+~/bin/random_wallpaper --lockscreen # random lock screen wallpaper
 ~/bin/random_wallpaper --set PATH --lockscreen
-~/bin/random_wallpaper --cache-all  # пересобрать кэш превью
-~/bin/select-wallpaper              # rofi-селектор с превью
-~/bin/select-wallpaper --lockscreen # селектор обоев локскрина
+~/bin/random_wallpaper --cache-all  # rebuild the thumbnail cache
+~/bin/select-wallpaper              # rofi selector with previews
+~/bin/select-wallpaper --lockscreen # lock screen wallpaper selector
 ```
 
-`select-wallpaper` (`Ctrl + Alt + T`) показывает сетку миниатюр, а не список
-имён. `Enter` применяет выбранное, `Alt + V` открывает картинку на весь экран
-(закрыть — `q`), `Alt + L` переключает между рабочим столом и локскрином,
-`Esc` отменяет. Отдельная комбинация `Ctrl + Alt + L` сразу открывает селектор
-локскрина. Превью кэшируются в `~/.cache/select-wallpaper/thumbs`, поэтому
-повторное открытие почти мгновенное. После ручного изменения `sxhkdrc`
-перезагрузите горячие клавиши командой `pkill -USR1 -x sxhkd` — иначе новые
-комбинации начнут работать только после входа в систему.
+`select-wallpaper` (`Ctrl + Alt + T`) shows a thumbnail grid instead of a list
+of names. `Enter` applies the selection, `Alt + V` opens the image fullscreen
+(close with `q`), `Alt + L` switches between the desktop and lock screen,
+`Esc` cancels. A separate shortcut, `Ctrl + Alt + L`, opens the lock screen
+selector directly. Previews are cached in
+`~/.cache/select-wallpaper/thumbs`, so reopening is almost instant. After
+editing `sxhkdrc` manually, reload the hotkeys with
+`pkill -USR1 -x sxhkd`; otherwise new shortcuts only work after logging in.
 
-Обычный селектор показывает только `Wallpaper_desktop`. Селектор локскрина
-сначала показывает `Wallpaper_lockscreen`, а ниже — обои из
-`Wallpaper_desktop` с пометкой `desktop/`. Если выбрать desktop-картинку,
-она копируется в `Wallpaper_lockscreen` и сразу применяется к экрану
-блокировки. Другие папки, включая `~/Downloads`, в сетку не подмешиваются.
+The regular selector shows only `Wallpaper_desktop`. The lock screen selector
+shows `Wallpaper_lockscreen` first, then desktop wallpapers marked
+`desktop/`. If you choose a desktop image, it is copied to
+`Wallpaper_lockscreen` and applied to the lock screen immediately. Other
+folders, including `~/Downloads`, are not mixed into the grid.
 
-Новую картинку можно положить в нужную библиотеку или применить напрямую:
+You can put a new image into the right library or apply it directly:
 
 ```bash
 ~/bin/random_wallpaper --set ~/Downloads/new.png
 ~/bin/random_wallpaper --set ~/Downloads/lock.png --lockscreen
 ```
 
-`random_wallpaper --set` импортирует файл в соответствующую библиотеку:
-из `Downloads`/`/tmp` он **перемещается**, из остальных мест копируется.
-Одинаковый файл не дублируется, а при совпадении имени с другим содержимым
-создаётся `имя-2.png`. После импорта файл находится обычным сканированием
-папки — никаких списков скачанных картинок нет.
+`random_wallpaper --set` imports the file into the matching library: from
+`Downloads`/`/tmp` it is **moved**, from other places it is copied. An
+identical file is not duplicated, and if the name matches a different file,
+`name-2.png` is created. After import, the file is found by the normal folder
+scan — there are no downloaded-image lists.
 
-`~/.current_wallpaper` и `~/.current_lockscreen` — стабильные симлинки на
-текущие исходники. `random_wallpaper` обновляет их атомарно; `screen-lock`
-читает именно `~/.current_lockscreen` (с запасным вариантом — первый файл
-из `Wallpaper_lockscreen`). `~/.fehbg` по-прежнему хранит экранную копию
-рабочего стола для быстрого восстановления при входе, а палитра строится
-из неё. Смена обоев локскрина палитру не трогает.
+`~/.current_wallpaper` and `~/.current_lockscreen` are stable symlinks to the
+current source files. `random_wallpaper` updates them atomically;
+`screen-lock` reads `~/.current_lockscreen` (with a fallback to the first file
+in `Wallpaper_lockscreen`). `~/.fehbg` still stores an on-screen copy of the
+desktop for fast restore at login, and the palette is built from it. Changing
+the lock screen wallpaper does not affect the palette.
 
-Арты, применённые из Anime Wall (`Alt + A`), автоматически копируются
-в `~/Images/Wallpaper_desktop` — в ту же библиотеку, которую листает
-селектор, поэтому их можно выбрать потом.
+Art applied from Anime Wall (`Alt + A`) is automatically copied to
+`~/Images/Wallpaper_desktop` — the same library the selector browses — so you
+can pick it later.
 
-### Anime Wall в терминале
+### Anime Wall in the terminal
 
-У `anime-wall` есть и обычный CLI — удобно для скриптов и массового
-скачивания:
+`anime-wall` also has a regular CLI, handy for scripts and bulk downloads:
 
 ```bash
-# показать результаты JSON-ом
+# print results as JSON
 anime-wall -p yandere -t 'asuna_(sword_art_online)' --print
 
-# скачать четыре пейзажа с Konachan
+# download four landscapes from Konachan
 anime-wall -p konachan -t landscape -n 8 --download 4
 
-# Gelbooru с фильтром по score
+# Gelbooru with a score filter
 anime-wall -p gelbooru -t landscape --min-score 10
 ```
 
-Настройки и API-ключи лежат в `~/.config/anime-wall/config.ini` (права
-`600`). Yande.re и Konachan работают без ключей. **Gelbooru** требует
-`api_key` и `user_id` — их можно ввести прямо в меню (`Gelbooru credentials…`),
-и файл обновится сам. **Danbooru** иногда закрыт Cloudflare: если API
-отвечает 403/503, откройте сайт в Firefox или подождите — Anime Wall
-покажет ошибку и не зависнет.
+Settings and API keys live in `~/.config/anime-wall/config.ini` (mode `600`).
+Yande.re and Konachan work without keys. **Gelbooru** requires `api_key` and
+`user_id`; you can enter them directly in the menu
+(`Gelbooru credentials…`), and the file updates itself. **Danbooru** is
+sometimes blocked by Cloudflare: if the API returns 403/503, open the site in
+Firefox or wait — Anime Wall will show an error and will not hang.
 
-`--download` складывает файлы туда же, в
-`~/Pictures/kiri-vault/<Провайдер>/`. Если хочется только собирать
-коллекцию, оставьте `on_enter = save` — это значение по умолчанию.
+`--download` stores files in the same place,
+`~/Pictures/kiri-vault/<Provider>/`. If you only want to build a collection,
+leave `on_enter = save` — that is the default.
 
-## 🌦️ Погода
+## 🌦️ Weather
 
-Модуль берёт температуру с wttr.in. Город можно задать в
-`~/.config/weather-city` строкой вида `Город,CC`. Файла в репозитории нет,
-по умолчанию город определяется по IP. Если wttr.in путает одноимённые
-места, допишите страну.
+The module gets the temperature from wttr.in. You can set the city in
+`~/.config/weather-city` as a line like `City,CC`. There is no file in the
+repo; by default the city is detected by IP. If wttr.in confuses places with
+the same name, add the country code.
 
-## 🖱️ Тачпад и мышь
+## 🖱️ Touchpad and mouse
 
-Пока подключена любая мышь (USB, Bluetooth, донгл), тачпад **намеренно
-выключен**. Убрали мышь — тачпад включается обратно через ~2 секунды. Так
-ладонь не задевает тачпад во время работы мышью.
+While any mouse is connected (USB, Bluetooth, dongle), the touchpad is
+**intentionally disabled**. Remove the mouse — the touchpad comes back after
+about 2 seconds. This keeps your palm from touching the touchpad while using
+the mouse.
 
-Это не поломка. Проверить состояние:
+This is not a bug. Check the state:
 
 ```bash
 xinput list-props "$(xinput list --name-only | grep -i touchpad)" | grep 'Device Enabled'
 ```
 
-`0` — выключен (мышь подключена), `1` — включён.
+`0` — disabled (mouse connected), `1` — enabled.
 
-Переключатель:
+Toggle:
 
 ```bash
-touchpad-autoswitch on      # автоматика включена (по умолчанию)
-touchpad-autoswitch off     # тачпад всегда включён
-touchpad-autoswitch toggle  # переключить
-touchpad-autoswitch status  # показать состояние
+touchpad-autoswitch on      # automation on (default)
+touchpad-autoswitch off     # touchpad always on
+touchpad-autoswitch toggle  # flip the current state
+touchpad-autoswitch status  # print the current state
 ```
 
-С клавиатуры — `Super + Shift + U`.
+Keyboard shortcut — `Super + Shift + U`.
 
-Состояние хранится в `~/.local/state/touchpad-when-mouse.off`: есть файл —
-автоматика выключена. Лог демона: `~/.local/state/touchpad-when-mouse.log`.
+The state is stored in `~/.local/state/touchpad-when-mouse.off`: if the file
+exists, automation is disabled. Daemon log:
+`~/.local/state/touchpad-when-mouse.log`.
 
-Устройства ищутся по подстроке `touchpad`, поэтому на другой машине менять
-ничего не нужно. Внутренний «Mouse»-интерфейс тачпада (он называется так же,
-как тачпад) и виртуальные указатели игнорируются. Выключенный тачпад `xinput`
-показывает как `floating slave` и добавляет к имени `∼` — демон это учитывает,
-иначе он не смог бы включить тачпад обратно.
+Devices are matched by the `touchpad` substring, so nothing needs to change
+on another machine. The touchpad's internal "Mouse" interface (it has the
+same name as the touchpad) and virtual pointers are ignored. A disabled
+touchpad shows up in `xinput` as `floating slave` with a `∼` prefix — the
+daemon accounts for that; otherwise it could not re-enable the touchpad.
 
-### 🖐️ Жесты
+### 🖐️ Gestures
 
-Жесты работают через `touchegg` (только X11). Демон `touchegg.service`
-включает установщик, клиент запускается из `bspwmrc`.
+Gestures work through `touchegg` (X11 only). The installer enables the
+`touchegg.service` daemon; the client is started from `bspwmrc`.
 
-| Жест | Действие |
+| Gesture | Action |
 |---|---|
-| 3 пальца влево / вправо | следующий / предыдущий рабочий стол |
-| 3 пальца вверх / вниз | фокус на окно выше / ниже |
-| 4 пальца влево / вправо | перенести окно на следующий / предыдущий стол |
-| 4 пальца вверх | полноэкранный режим |
-| 4 пальца вниз | плавающий режим |
+| 3 fingers left / right | next / previous desktop |
+| 3 fingers up / down | focus up / down in the layout |
+| 4 fingers left / right | move the window to the next / previous desktop |
+| 4 fingers up | fullscreen |
+| 4 fingers down | floating mode |
 
-Направления «естественные»: свайп влево — вперёд, вправо — назад. Если
-подключена мышь и тачпад выключен автоматикой, жесты не работают — это
-ожидаемо. Включить тачпад: `Super + Shift + U` или `touchpad-autoswitch off`.
+Directions are "natural": swipe left goes forward, right goes back. If a
+mouse is connected and the touchpad is disabled by automation, gestures do
+not work — that is expected. Enable the touchpad: `Super + Shift + U` or
+`touchpad-autoswitch off`.
 
-Конфиг: `~/.config/touchegg/touchegg.conf`. После правки перезапустите
-клиент: `pkill -f '[t]ouchegg$'` и снова войдите в сессию (или запустите
-`touchegg` из терминала).
+Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:
+`pkill -f '[t]ouchegg$'` and log in again (or run `touchegg` from a terminal).
 
-### 🪟 Раскладка как в Niri
+### 🪟 Niri-style layout
 
-В bspwm нет drag-to-split: если тащить тайловое окно на другое, они просто
-поменяются местами. Тот же результат можно получить с клавиатуры:
+bspwm has no drag-to-split: if you drag a tiled window onto another, they
+simply swap. You can get the same result from the keyboard:
 
-1. `Super + Alt + M` — пометить окно, которое хотите перенести.
-2. Перейти на окно-цель обычными клавишами фокуса.
-3. `Super + Alt + H/J/K/L` — выбрать половину цели:
-   лево / низ / верх / право.
-4. `Super + Alt + Enter` — вставить помеченное окно в эту половину.
-5. `Super + Alt + C` — отменить выбранную половину.
+1. `Super + Alt + M` — mark the window you want to move.
+2. Focus the target window with the usual focus keys.
+3. `Super + Alt + H/J/K/L` — choose a half of the target:
+   left / bottom / top / right.
+4. `Super + Alt + Enter` — insert the marked window into that half.
+5. `Super + Alt + C` — cancel the selected half.
 
-Пример: пометить маленькое окно, встать на большое окно слева, нажать
-`Super + Alt + K` (верхняя половина), затем `Super + Alt + Enter`. Область
-большого окна разделится: маленькое займёт верхнюю половину, большое —
-нижнюю.
+Example: mark a small window, focus the large window on the left, press
+`Super + Alt + K` (top half), then `Super + Alt + Enter`. The large window's
+area is split: the small window takes the top half, the large one the bottom
+half.
 
-Скрипт: `~/.local/bin/bspwm-split` (есть `status` и `--help`).
+Script: `~/.local/bin/bspwm-split` (also supports `status` and `--help`).
 
-## 📝 Мелочи
+## 📝 Notes
 
-- Только Arch/CachyOS и X11, Wayland не поддерживается.
-- `hz-toggle` и `dual_monitors.sh` завязаны на конкретное железо. На другой
-  машине сначала посмотрите `xrandr --query`.
-- Модели Whisper не лежат в git, их скачивает `--with-whisper`.
-- picom запускается с профилем `1.conf`. Если включить второй профиль,
-  скриншоты всё равно не будут размываться: `slop` есть в исключениях.
-- Throne получает `CAP_NET_ADMIN` через pacman-hook, поэтому TUN работает
-  без запросов root после обновлений.
-- GTK-тема `Dynamic` — перекрашенная копия Dracula. Открытые окна подхватят
-  цвета после перезапуска.
-- `ly` ставится только с `--with-extra`.
-- `v2raya-bin` (v2rayA) вместе с ядром `xray` и `upscayl-bin` (Upscayl)
-  ставятся по умолчанию. Сервис v2rayA включается отдельно:
-  `sudo systemctl enable --now v2raya`.
-- `anime-wall` использует только стандартную библиотеку Python; для
-  ANSI-арта fastfetch нужен `python-pillow`.
+- Arch/CachyOS and X11 only; Wayland is not supported.
+- `hz-toggle` and `dual_monitors.sh` are tied to specific hardware. On another
+  machine, check `xrandr --query` first.
+- Whisper models are not stored in git; `--with-whisper` downloads them.
+- picom starts with profile `1.conf`. If you enable the second profile,
+  screenshots still will not be blurred: `slop` is in the exceptions.
+- Throne gets `CAP_NET_ADMIN` through a pacman hook, so TUN works without
+  root prompts after updates.
+- The `Dynamic` GTK theme is a recolored copy of Dracula. Open windows pick up
+  the colors after a restart.
+- `ly` is installed only with `--with-extra`.
+- `v2raya-bin` (v2rayA) together with the `xray` core and `upscayl-bin`
+  (Upscayl) are installed by default. The v2rayA service is enabled
+  separately: `sudo systemctl enable --now v2raya`.
+- `anime-wall` uses only the Python standard library; fastfetch's ANSI art
+  needs `python-pillow`.
 
-## 📂 Структура
+## 📂 Structure
 
 ```text
-bin/          скрипты (~/.local/bin)
-config/       содержимое ~/.config
+bin/          scripts (~/.local/bin)
+config/       contents of ~/.config
 system/       udev, modprobe, pacman-hook
-themes/       Dracula и её варианты
-Images/       скриншоты и библиотеки обоев (Wallpaper_desktop/lockscreen)
-install.sh    установщик
+themes/       Dracula and its variants
+Images/       screenshots and wallpaper libraries (Wallpaper_desktop/lockscreen)
+install.sh    installer
 bootstrap.sh  clone + install
 ```
 
-## 📄 Лицензия
+## 📄 License
 
-MIT. См. [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

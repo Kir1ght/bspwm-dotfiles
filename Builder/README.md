@@ -1,14 +1,14 @@
 # Builder
 
-`Builder/install.py` — интерактивная обёртка над `../install.sh`.
+`Builder/install.py` is an interactive wrapper around `../install.sh`.
 
-Логика установки живёт в `install.sh` (его проще читать и запускать повторно),
-а `Builder/` оставлен как удобный интерактивный вход:
+The installation logic lives in `install.sh` (it is easier to read and run
+again), while `Builder/` is kept as a convenient interactive entry point:
 
 ```bash
 python3 Builder/install.py
 python3 Builder/install.py --yes
 ```
 
-`packages.py` содержит те же группы пакетов, что и `install.sh`, — для
-справки и будущих изменений. Если меняете список пакетов, меняйте оба файла.
+`packages.py` contains the same package groups as `install.sh` — for reference
+and future changes. If you change the package list, update both files.
