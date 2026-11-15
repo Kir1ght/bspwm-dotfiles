@@ -188,6 +188,8 @@ before copying.
 | `Super + Shift + H/J/K/L` | swap windows |
 | `Super + Ctrl + H/J/K/L` | resize the window |
 | `Super + Ctrl + T` | pseudo-tiling: keep size / return to a normal tile |
+| `Super + A` | floating ↔ tiled (always returns to a tile) |
+| `Super + F` | fullscreen ↔ the state it came from |
 | `Super + Alt + drag / click` | split: drag onto a half, or click to mark and place |
 | `Alt + Shift` | us/ru layout |
 | `Ctrl + Shift + T` | random wallpaper |
@@ -305,17 +307,22 @@ the same name, add the country code.
 ## 🖱️ Touchpad and mouse
 
 While any mouse is connected (USB, Bluetooth, dongle), the touchpad is
-**intentionally disabled**. Remove the mouse — the touchpad comes back after
-about 2 seconds. This keeps your palm from touching the touchpad while using
+**intentionally disabled**. Remove the mouse and the touchpad comes back
+after a few seconds. This keeps your palm from touching the pad while using
 the mouse.
+
+The touchpad exposes two XInput pointer devices with the same hardware name
+(`... Mouse` and `... Touchpad`). Both are disabled and enabled together:
+disabling only the one matching `touchpad` leaves the companion alive, which
+is why the pad used to keep working while a mouse was connected.
 
 This is not a bug. Check the state:
 
 ```bash
-xinput list-props "$(xinput list --name-only | grep -i touchpad)" | grep 'Device Enabled'
+xinput list --short | grep -iE 'touchpad|uniw|synaptics|elan'
 ```
 
-`0` — disabled (mouse connected), `1` — enabled.
+`slave pointer` — enabled; `floating slave` — disabled.
 
 Toggle:
 
@@ -332,24 +339,31 @@ The state is stored in `~/.local/state/touchpad-when-mouse.off`: if the file
 exists, automation is disabled. Daemon log:
 `~/.local/state/touchpad-when-mouse.log`.
 
-Devices are matched by the `touchpad` substring, so nothing needs to change
-on another machine. The touchpad's internal "Mouse" interface (it has the
-same name as the touchpad) and virtual pointers are ignored. A disabled
-touchpad shows up in `xinput` as `floating slave` with a `∼` prefix — the
-daemon accounts for that; otherwise it could not re-enable the touchpad.
+Devices are grouped by the hardware name prefix before `Mouse` / `Touchpad`,
+so nothing needs to change on another machine. Virtual core pointers are
+ignored. A disabled device shows up in `xinput` as `floating slave` with a
+`∼` prefix; the daemon accounts for that, otherwise it could not re-enable
+the pad.
+
+A mouse is detected both through XInput and through the kernel
+(`/proc/bus/input/devices`). Wireless dongles can vanish from X for a moment
+while the kernel still lists them; the kernel check keeps the pad off during
+that window. Absence is debounced (three polls, about six seconds), so a
+brief dongle dropout does not switch the pad back on.
 
 ### 🖐️ Gestures
 
 Gestures work through `touchegg` (X11 only). The installer enables the
-`touchegg.service` daemon; the client is started from `bspwmrc`.
+`touchegg.service` system daemon; the per-session client is managed by
+`touchpad-when-mouse.sh`, which stops it while a mouse is connected.
 
 | Gesture | Action |
 |---|---|
 | 3 fingers left / right | next / previous desktop |
 | 3 fingers up / down | focus up / down in the layout |
 | 4 fingers left / right | move the window to the next / previous desktop |
-| 4 fingers up | fullscreen |
-| 4 fingers down | floating mode |
+| 4 fingers up | fullscreen / back to the previous state |
+| 4 fingers down | floating ↔ tiled |
 
 Directions are "natural": swipe left goes forward, right goes back. Gestures
 are touchpad-only: a mouse or its dongle cannot trigger them. If a mouse is
@@ -358,12 +372,15 @@ that is expected. Enable the touchpad: `Super + Shift + U` or
 `touchpad-autoswitch off`.
 
 Touchégg reads the touchpad through libinput, so `xinput disable` alone does
-not stop gestures: the gesture client is stopped together with the touchpad
-and started again when the mouse is unplugged. Unplug the mouse (or pause the
-automation) to try the gestures.
+not stop gestures: the daemon stops the per-session client as well and starts
+it again when the mouse goes away. Only that client is touched — the
+`touchegg --daemon` service keeps running. While a mouse is connected the pad
+and its gestures accept nothing.
 
 Config: `~/.config/touchegg/touchegg.conf`. After editing, restart the client:
-`pkill -f '[t]ouchegg$'` and log in again (or run `touchegg` from a terminal).
+`pkill -f '[t]ouchegg$'` (the daemon starts it again within a couple of
+seconds when no mouse is connected), or run `touchegg` from a terminal after
+`touchpad-autoswitch off`.
 
 ### 🪟 Windows: native bspwm + Niri-style split
 
@@ -380,6 +397,15 @@ that fills the monitor has nothing to resize against: make it pseudo-tiled
 (`Super + Ctrl + T`) first, then resize it with the mouse or with
 `Super + Ctrl + H/J/K/L`. Windows that report a fixed size (dialogs) keep
 that size by design.
+
+`Super + A` and `Super + F` use `~/.local/bin/bspwm-toggle-state` instead of
+bspwm's own `~floating` / `~fullscreen`. bspwm's `~STATE` remembers only the
+previous state, so after a fullscreen visit `Super + A` would bounce between
+floating and fullscreen and never return to the tile. The helper chooses the
+target explicitly: floating always goes back to a normal tile, and leaving
+fullscreen restores the state the window came from. It behaves the same for
+tiled, pseudo-tiled, floating, fullscreen and fixed-size dialog windows. The
+4-finger touchpad gestures call the same helper.
 
 Hold **`Super + Alt`** to place windows Niri-style instead of swapping:
 

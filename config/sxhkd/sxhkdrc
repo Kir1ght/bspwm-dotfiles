@@ -188,13 +188,16 @@ XF86Audio{Play,Next,Prev,Stop}
 super + ctrl + t
     ~/bin/bspwm-pseudo
 
-# Toggle fullscreen mode (F = Fullscreen)
+# Toggle fullscreen mode (F = Fullscreen). Leaving fullscreen restores the
+# state the window came from (tiled / floating / pseudo-tiled).
 super + f
-    bspc node -t ~fullscreen
+    ~/bin/bspwm-toggle-state fullscreen
 
-# Toggle floating mode (A = Alternative / Floating)
+# Toggle floating mode (A = Alternative / Floating). Floating always goes back
+# to a normal tile, even after a fullscreen visit. Plain `bspc node -t
+# ~floating` would restore "fullscreen" here and bounce forever.
 super + a
-    bspc node -t ~floating
+    ~/bin/bspwm-toggle-state floating
 
 # Cycle window focus (including floating)
 alt + {_,shift + }Tab

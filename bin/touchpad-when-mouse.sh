@@ -1,138 +1,125 @@
 #!/usr/bin/env bash
 # Disable the touchpad while any external mouse is connected (X11 / xinput).
-# Works with USB, Bluetooth and dongles. Ignores the touchpad's internal
-# "Mouse" companion device and virtual core pointers.
+# Works with USB, Bluetooth and dongles.
+#
+# The touchpad exposes two XInput pointers that share a hardware name prefix
+# (see touchpad-lib.sh); both are disabled and re-enabled together, otherwise
+# the companion "Mouse" interface keeps the pad usable.
+#
+# Gestures are handled too: Touchégg reads the pad through libinput, so
+# `xinput disable` alone does not stop them. The per-session Touchégg client
+# is stopped while a mouse is connected and started again when it goes away.
+# Only the client is touched; the `touchegg --daemon` system service keeps
+# running.
+#
+# Absence is debounced: a wireless dongle can vanish from X for a moment, so
+# the touchpad returns only after several polls without a mouse.
 #
 # Disable automation:  touchpad-autoswitch off   (Super+Shift+U)
-#   or:               pkill -f '[/]home/kiri/.local/bin/touchpad-when-mouse.sh'
-# Enable touchpad manually:  /usr/sbin/xinput enable "UNIW0001:00 093A:0255 Touchpad"
+#   or:               pkill -f '[/]touchpad-when-mouse\.sh'
+# Enable touchpad manually:  touchpad-autoswitch off
+#
+# Test knobs (all optional): TP_XINPUT, TP_DEVICES_FILE, TP_PROC_ROOT,
+# TP_TOUCHEGG, TP_STATE_DIR, TP_POLL, TP_DEBOUNCE, TP_LOCK.
 
-XINPUT=/usr/sbin/xinput
+set -u
 
-LOG="${XDG_STATE_HOME:-$HOME/.local/state}/touchpad-when-mouse.log"
-OFF_FLAG="${XDG_STATE_HOME:-$HOME/.local/state}/touchpad-when-mouse.off"
-mkdir -p "$(dirname "$LOG")"
+self=$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+. "$(dirname -- "$self")/touchpad-lib.sh"
+
+STATE_DIR="${TP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}"
+LOG="$STATE_DIR/touchpad-when-mouse.log"
+OFF_FLAG="$STATE_DIR/touchpad-when-mouse.off"
+POLL=${TP_POLL:-2}
+DEBOUNCE=${TP_DEBOUNCE:-3}
+LOCK=${TP_LOCK:-${XDG_RUNTIME_DIR:-/tmp}/touchpad-when-mouse.lock}
+
+mkdir -p "$STATE_DIR"
 exec >>"$LOG" 2>&1
 
 # Single instance: without this, restarting bspwm could stack daemons.
 if command -v flock >/dev/null 2>&1; then
-    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/touchpad-when-mouse.lock"
+    exec 9>"$LOCK"
     flock -n 9 || exit 0
 fi
 
-echo "start $(date -Is) DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset}"
+log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 
-# Last gesture state, so the client is stopped/started only on transitions.
-last_gestures=""
+log "start DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset} poll=${POLL}s debounce=${DEBOUNCE}"
 
-# Touchégg reads the touchpad through libinput, so `xinput disable` does not
-# stop its gestures: the client has to be stopped as well. Only the client
-# executes actions — the system daemon (`touchegg --daemon`) can keep running.
-gestures() {   # $1 = on|off
-    command -v touchegg >/dev/null 2>&1 || return 0
-    if [ "$1" = off ]; then
-        pgrep -f '[t]ouchegg$' >/dev/null 2>&1 && pkill -f '[t]ouchegg$'
-    else
-        pgrep -f '[t]ouchegg$' >/dev/null 2>&1 \
-            || setsid -f touchegg >/dev/null 2>&1
+# Last applied mode: mouse | touchpad | paused. Empty until the first poll.
+applied=""
+absent=$DEBOUNCE          # apply "no mouse" on the first poll without delay
+bad_polls=0
+
+apply() {   # $1 = mode, $2 = message
+    local mode=$1 msg=$2 i id state
+    for i in "${!TP_DEV_IDS[@]}"; do
+        tp_is_group "${TP_DEV_NAMES[$i]}" || continue
+        id=${TP_DEV_IDS[$i]}
+        state=${TP_DEV_STATES[$i]}
+        case $mode in
+            mouse)
+                # Only touch devices that are still enabled; calling disable
+                # on an already disabled device just produces X errors.
+                case $state in *pointer*) "$TP_XINPUT" disable "$id" 2>/dev/null ;; esac
+                ;;
+            touchpad|paused)
+                case $state in
+                    *pointer*) ;;
+                    *) "$TP_XINPUT" enable "$id" 2>/dev/null ;;
+                esac
+                ;;
+        esac
+    done
+    case $mode in
+        mouse)            tp_gestures off ;;
+        touchpad|paused)  tp_gestures on ;;
+    esac
+    if [ "$applied" != "$mode" ]; then
+        log "$msg"
+        applied=$mode
     fi
-}
-
-# Output: id<TAB>name<TAB>state for every input device.
-# Matches both enabled devices ("↳ Name  id=15 [slave pointer]") and
-# disabled ones ("∼ Name  id=15 [floating slave]").
-read_devices() {
-    "$XINPUT" list --short 2>/dev/null \
-        | sed -n 's/^[^A-Za-z0-9]*[[:space:]]*\(.*\)[[:space:]]\+id=\([0-9]\+\).*\[\([^]]*\)\].*/\2\t\1\t\3/p'
 }
 
 while :; do
-    TP_IDS=()
-    TP_NAMES=()
-    DEV_IDS=()
-    DEV_NAMES=()
-    DEV_STATES=()
+    tp_read_devices
+    tp_compute_bases
 
-    while IFS=$'\t' read -r id name state; do
-        [ -z "$id" ] && continue
-        name=${name#"∼ "}
-        # xinput pads names with spaces before "id="; trim them.
-        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-        DEV_IDS+=("$id")
-        DEV_NAMES+=("$name")
-        DEV_STATES+=("$state")
-        if printf '%s' "$name" | grep -qi 'touchpad'; then
-            TP_IDS+=("$id")
-            TP_NAMES+=("$name")
+    if [ "${#TP_DEV_IDS[@]}" -eq 0 ]; then
+        # XInput is not ready yet (early bspwm startup, post-resume, ...).
+        bad_polls=$((bad_polls + 1))
+        if [ "$bad_polls" -eq 1 ] || [ $((bad_polls % 30)) -eq 0 ]; then
+            log "xinput returned no devices (attempt $bad_polls), retrying"
         fi
-    done < <(read_devices)
-
-    # XInput may not be ready yet during early bspwm startup.
-    if [ "${#TP_IDS[@]}" -eq 0 ]; then
-        sleep 2
+        sleep "$POLL" 9>&-
         continue
     fi
+    bad_polls=0
 
-    # Manual override: `touchpad-autoswitch off` creates this flag.
     if [ -f "$OFF_FLAG" ]; then
-        for id in "${TP_IDS[@]}"; do "$XINPUT" enable "$id" 2>/dev/null; done
-        if [ "$last_gestures" != "on" ]; then
-            echo "gestures on (automation paused) $(date -Is)"
-            gestures on
-            last_gestures=on
-        fi
-        sleep 2
+        absent=$DEBOUNCE
+        apply paused "automation paused: touchpad on, gestures on"
+        sleep "$POLL" 9>&-
         continue
     fi
 
-    # Devices that must NOT count as a mouse: virtual devices and the internal
-    # "Mouse" interface that shares the touchpad's name prefix.
-    INTERNAL_RE='Virtual core|XTEST'
-    for name in "${TP_NAMES[@]}"; do
-        base=${name%%[Tt]ouch[Pp]ad}
-        base=${base%%[Tt][Oo][Uu][Cc][Hh][Pp][Aa][Dd]}
-        esc=$(printf '%s' "$base" | sed 's/[][^$.*+?(){}\\|]/\\&/g')
-        INTERNAL_RE="$INTERNAL_RE|${esc}"
-    done
-
-    mouse_present=0
-    for i in "${!DEV_IDS[@]}"; do
-        name=${DEV_NAMES[$i]}
-        state=${DEV_STATES[$i]}
-
-        # Only real pointer devices. A disabled touchpad is "floating slave".
-        case "$state" in
-            *pointer*) ;;
-            *) continue ;;
-        esac
-
-        case "$name" in
-            "Virtual core"*|"XTEST"*) continue ;;
-        esac
-
-        if printf '%s' "$name" | grep -qiE "$INTERNAL_RE"; then
-            continue
-        fi
-
-        mouse_present=1
-        break
-    done
-
-    if [ "$mouse_present" -eq 1 ]; then
-        for id in "${TP_IDS[@]}"; do "$XINPUT" disable "$id" 2>/dev/null; done
-        if [ "$last_gestures" != "off" ]; then
-            echo "mouse connected: touchpad off, gestures off $(date -Is)"
-            gestures off
-            last_gestures=off
-        fi
-    else
-        for id in "${TP_IDS[@]}"; do "$XINPUT" enable  "$id" 2>/dev/null; done
-        if [ "$last_gestures" != "on" ]; then
-            echo "mouse disconnected: touchpad on, gestures on $(date -Is)"
-            gestures on
-            last_gestures=on
-        fi
+    present=0
+    tp_kernel_mouse_present && present=1
+    if [ "$present" -eq 0 ] && tp_xinput_mouse_present; then
+        present=1
     fi
 
-    sleep 2
+    if [ "$present" -eq 1 ]; then
+        absent=0
+        apply mouse "mouse connected: touchpad off, gestures off"
+    else
+        [ "$absent" -lt "$DEBOUNCE" ] && absent=$((absent + 1))
+        if [ "$absent" -ge "$DEBOUNCE" ]; then
+            apply touchpad "mouse disconnected: touchpad on, gestures on"
+        fi
+        # Otherwise: brief absence (dongle flap) — keep the touchpad off.
+    fi
+
+    sleep "$POLL" 9>&-
 done

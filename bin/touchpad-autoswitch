@@ -10,26 +10,25 @@
 
 set -u
 
-XINPUT=/usr/sbin/xinput
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}"
+self=$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+. "$(dirname -- "$self")/touchpad-lib.sh"
+
+STATE_DIR="${TP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}"
 FLAG="$STATE_DIR/touchpad-when-mouse.off"
-DAEMON="$HOME/.local/bin/touchpad-when-mouse.sh"
+DAEMON=${TP_DAEMON:-$HOME/.local/bin/touchpad-when-mouse.sh}
+[ -x "$DAEMON" ] || DAEMON="$(dirname -- "$self")/touchpad-when-mouse.sh"
 
 mkdir -p "$STATE_DIR"
 
 is_off() { [ -f "$FLAG" ]; }
 
-touchpad_ids() {
-    "$XINPUT" list --short 2>/dev/null \
-        | sed -n 's/^[^A-Za-z0-9]*[[:space:]]*\(.*\)[[:space:]]\+id=\([0-9]\+\).*\[\([^]]*\)\].*/\2\t\1\t\3/p' \
-        | awk -F'\t' 'tolower($2) ~ /touchpad/ {print $1}'
-}
-
-set_touchpad() {   # $1 = enable|disable
+set_touchpad() {   # enable | disable
     local id
-    for id in $(touchpad_ids); do
-        "$XINPUT" "$1" "$id" 2>/dev/null
-    done
+    tp_read_devices
+    tp_compute_bases
+    while IFS= read -r id; do
+        [ -n "$id" ] && "$TP_XINPUT" "$1" "$id" 2>/dev/null
+    done < <(tp_ids)
 }
 
 notify() {
@@ -45,28 +44,34 @@ status() {
     fi
 }
 
+enable_automation() {
+    rm -f "$FLAG"
+    notify "Enabled: touchpad turns off while a mouse is connected"
+    echo "on"
+}
+
+disable_automation() {
+    : > "$FLAG"
+    # Do not wait for the daemon: turn the pad (both interfaces) back on and
+    # start gestures right away.
+    set_touchpad enable
+    tp_gestures on
+    notify "Disabled: touchpad stays on"
+    echo "off"
+}
+
 case "${1:-toggle}" in
     on)
-        rm -f "$FLAG"
-        notify "Enabled: touchpad turns off while a mouse is connected"
-        echo "on"
+        enable_automation
         ;;
     off)
-        : > "$FLAG"
-        set_touchpad enable          # re-enable immediately, don't wait for the daemon
-        notify "Disabled: touchpad stays on"
-        echo "off"
+        disable_automation
         ;;
     toggle)
         if is_off; then
-            rm -f "$FLAG"
-            notify "Enabled: touchpad turns off while a mouse is connected"
-            echo "on"
+            enable_automation
         else
-            : > "$FLAG"
-            set_touchpad enable
-            notify "Disabled: touchpad stays on"
-            echo "off"
+            disable_automation
         fi
         ;;
     status)
@@ -78,8 +83,9 @@ case "${1:-toggle}" in
         ;;
 esac
 
-# If the daemon is not running (e.g. after manual kill), start it again.
-if ! pgrep -f '[/]home/kiri/.local/bin/touchpad-when-mouse.sh' >/dev/null 2>&1 \
+# If the daemon is not running (e.g. after a manual kill), start it again.
+# The daemon's flock makes a double start harmless.
+if ! pgrep -f '[t]ouchpad-when-mouse\.sh' >/dev/null 2>&1 \
    && [ -x "$DAEMON" ]; then
     setsid -f "$DAEMON" >/dev/null 2>&1
 fi

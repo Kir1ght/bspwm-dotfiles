@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Toggle a window between tiled and floating / fullscreen / pseudo-tiled
+# without bspwm's `~STATE` last-state bounce.
+#
+# bspwm's `bspc node -t ~floating` does NOT mean "tiled <-> floating": when the
+# window is already floating bspwm restores `lastState` instead. After a
+# fullscreen visit `lastState` is "fullscreen", so the sequence
+#
+#     tiled -> Super+F (fullscreen) -> Super+A (floating) -> Super+A
+#
+# ping-pongs floating <-> fullscreen forever and the window never returns to
+# the tiling layer. `~fullscreen` has the same trap after a floating visit.
+# The touchpad gestures used the same broken toggle, so they felt "one-way".
+#
+# This helper chooses the target state explicitly:
+#
+#   floating    floating -> tiled; anything else -> floating
+#   fullscreen  fullscreen -> the state it came from; anything else -> fullscreen
+#   pseudo      pseudo_tiled -> tiled; anything else -> pseudo_tiled
+#
+# Usage: bspwm-toggle-state {floating|fullscreen|pseudo}
+
+set -u
+
+usage() {
+    echo "usage: $(basename "$0") {floating|fullscreen|pseudo}" >&2
+    exit 2
+}
+
+[ $# -eq 1 ] || usage
+
+json=$(bspc query -T -n focused 2>/dev/null) || exit 0
+[ -n "$json" ] || exit 0
+
+field() {   # $1 = json key, e.g. state / lastState
+    printf '%s' "$json" \
+        | grep -o "\"$1\":\"[a-z_]*\"" \
+        | head -n 1 \
+        | cut -d'"' -f4
+}
+
+state=$(field state)
+[ -n "$state" ] || exit 0   # focus is a desktop, not a window
+
+case "$1" in
+    floating)
+        if [ "$state" = floating ]; then
+            target=tiled
+        else
+            target=floating
+        fi
+        ;;
+    fullscreen)
+        if [ "$state" = fullscreen ]; then
+            # Returning from fullscreen: restore where we came from. Never
+            # restore "fullscreen" itself, or the toggle would get stuck.
+            last=$(field lastState)
+            case "$last" in
+                tiled|pseudo_tiled|floating) target=$last ;;
+                *) target=tiled ;;
+            esac
+        else
+            target=fullscreen
+        fi
+        ;;
+    pseudo|pseudo_tiled)
+        if [ "$state" = pseudo_tiled ]; then
+            target=tiled
+        else
+            target=pseudo_tiled
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+bspc node focused -t "$target"

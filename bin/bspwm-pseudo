@@ -1,22 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Toggle pseudo-tiling for the focused window.
 #
 # A pseudo-tiled window keeps its own size inside a tile. bspwm's own
-# "~STATE" toggle restores the *previous* state, so a floating window stays
-# floating (it just looks pseudo-tiled for a moment). This script picks the
-# target state explicitly: pseudo-tiled -> tiled, everything else ->
-# pseudo-tiled, and reports the result so the hotkey never feels "stuck".
+# "~STATE" toggle restores the *previous* state, so it can get stuck bouncing
+# between two states. The shared helper picks the target explicitly:
+# pseudo-tiled -> tiled, everything else -> pseudo-tiled.
 
-state=$(bspc query -T -n focused 2>/dev/null | grep -o '"state":"[a-z_]*"' | head -1 | cut -d'"' -f4)
-[ -n "$state" ] || exit 0
+set -u
 
-if [ "$state" = "pseudo_tiled" ]; then
-    bspc node focused -t tiled
-    message="Tiled"
-else
-    bspc node focused -t pseudo_tiled
-    message="Pseudo-tiled"
-fi
+self_dir=$(dirname -- "$(readlink -f -- "$0")")
+"$self_dir/bspwm-toggle-state" pseudo || exit $?
+
+state=$(bspc query -T -n focused 2>/dev/null \
+    | grep -o '"state":"[a-z_]*"' | head -1 | cut -d'"' -f4)
+case "$state" in
+    pseudo_tiled) message="Pseudo-tiled" ;;
+    *)            message="Tiled" ;;
+esac
 
 if command -v notify-send >/dev/null 2>&1; then
     notify-send -t 1200 -u low -h string:x-dunst-stack-tag:bspwm-state \
