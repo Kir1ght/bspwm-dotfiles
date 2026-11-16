@@ -203,10 +203,28 @@ curl -fsSL https://raw.githubusercontent.com/Kir1ght/bspwm-dotfiles/main/bootstr
 
 Медиа-клавиши и Fn-клавиши яркости тоже привязаны в sxhkd.
 
-Раскладка `us/ru` настраивается один раз за X-сессию в `bspwmrc` (и в
-`xinitrc` для startx): `setxkbmap -layout us,ru -option grp:alt_shift_toggle`.
-Перезапуск `bspwmrc` активную раскладку не сбрасывает. Если `Alt + Shift` не
-работает, проверьте, что установлен пакет `xorg-setxkbmap`.
+Раскладка `us/ru` настраивается в `bspwmrc` (и в `xinitrc` для startx):
+`setxkbmap -layout us,ru -option grp:alt_shift_toggle`. Перезапуск `bspwmrc`
+активную раскладку не сбрасывает: карта применяется только если загруженная
+неверна.
+
+Беспроводной донгл мыши тоже представляет собой клавиатурные устройства, и
+при каждом переподключении Xorg заново применяет
+`/etc/X11/xorg.conf.d/00-keyboard.conf` ко всем клавиатурам. Поэтому в этом
+файле должны быть обе группы, иначе `ru` пропадает посреди сессии.
+`install.sh` настраивает его командой
+`localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle`. Для уже
+установленной системы выполните ту же команду через `sudo`; она заработает
+после следующего входа. `bin/xkb-layout-guard` — страховка для текущей
+сессии: он ждёт события udev (без опроса) и восстанавливает раскладку после
+hotplug.
+
+Если `Alt + Shift` всё равно не работает, проверьте:
+
+```bash
+setxkbmap -query    # layout: us,ru, options: grp:alt_shift_toggle
+xkb-switch -l      # должны быть us и ru
+```
 
 ## 🖼️ Обои и палитра
 

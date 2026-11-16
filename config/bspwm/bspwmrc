@@ -51,17 +51,30 @@ bspc rule -a feh state=floating
 xrdb merge ~/.Xresources
 
 # Keyboard layout: configure here too, because ly starts bspwm directly and
-# never runs ~/.xinitrc. bspwmrc also runs on every reload, and calling
-# setxkbmap again would switch the user back to the first layout. The X root
-# property marks "already configured for this X session"; it disappears when X
-# restarts, so the next login configures the layout again.
+# never runs ~/.xinitrc. Re-applying unconditionally would switch the user back
+# to the first layout on every bspwmrc reload, so apply it only when the loaded
+# keymap is actually wrong.
+#
+# Check the real keymap, not a flag in a root property. Xorg rebuilds the
+# keymap whenever an input device is hotplugged (this laptop's wireless dongle
+# exposes keyboard devices and reconnects on its own) and re-applies
+# /etc/X11/xorg.conf.d/00-keyboard.conf. If that file lists only "us", the
+# Russian group vanishes mid-session while a remembered flag would survive.
+# ~/.local/bin/xkb-layout-guard covers the hotplug case; the permanent cure is
+# `localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle`.
 if command -v setxkbmap >/dev/null 2>&1; then
-    if ! xprop -root _KIRI_KBD_LAYOUT 2>/dev/null | grep -q '_KIRI_KBD_LAYOUT(STRING)'; then
-        if setxkbmap -layout us,ru -option grp:alt_shift_toggle; then
-            xprop -root -f _KIRI_KBD_LAYOUT 8s -set _KIRI_KBD_LAYOUT "us,ru" 2>/dev/null || true
-        fi
+    kbd_query=$(setxkbmap -query 2>/dev/null)
+    kbd_layout=$(printf '%s\n' "$kbd_query" | sed -n 's/^layout:[[:space:]]*//p')
+    kbd_options=$(printf '%s\n' "$kbd_query" | sed -n 's/^options:[[:space:]]*//p')
+    if [ "$kbd_layout" != "us,ru" ] ||
+        ! printf '%s' "$kbd_options" | grep -q 'grp:alt_shift_toggle'; then
+        setxkbmap -layout us,ru -option grp:alt_shift_toggle || true
     fi
 fi
+
+# Restore the layout if an input hotplug resets it mid-session.
+pgrep -f 'sh .*/xkb-layout-guard$' >/dev/null 2>&1 ||
+    setsid -f "$HOME/.local/bin/xkb-layout-guard" >/dev/null 2>&1
 
 # Language change notifications (listens to XKB group changes)
 # OFF: commented out — uncomment to re-enable (requires xkb-switch)

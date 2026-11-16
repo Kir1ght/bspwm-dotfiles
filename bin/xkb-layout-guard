@@ -1,0 +1,87 @@
+#!/bin/sh
+# Keep the us,ru keymap alive across input hotplug.
+#
+# Xorg re-applies /etc/X11/xorg.conf.d/00-keyboard.conf (the "system-keyboard"
+# InputClass) to every keyboard whenever an input device is added or removed.
+# A wireless dongle that reconnects therefore rebuilds the keymap from that
+# file; if it lists only "us", the Russian group disappears mid-session and
+# Alt+Shift stops working.
+#
+# This waits on udev instead of polling, so it costs nothing while idle. The
+# permanent cure is `localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle`;
+# the guard keeps sessions that started before that change usable.
+export LC_ALL=C
+
+LAYOUT=${KBD_LAYOUT:-us,ru}
+OPTION=${KBD_OPTION:-grp:alt_shift_toggle}
+LOG=${KBD_GUARD_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/xkb-layout-guard.log}
+EVENTS=${KBD_EVENT_CMD:-udevadm monitor --kernel --subsystem-match=input --property}
+RUNTIME=${XDG_RUNTIME_DIR:-/tmp}
+
+log() {
+    mkdir -p "${LOG%/*}" 2>/dev/null
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG" 2>/dev/null
+}
+
+# One guard per user session. The runtime directory is recreated on login, so a
+# guard left over from an earlier session cannot block this one.
+exec 9>"$RUNTIME/xkb-layout-guard.lock" || exit 1
+flock -n 9 || exit 0
+
+x_alive() {
+    xset q >/dev/null 2>&1
+}
+
+needs_fix() {
+    query=$(setxkbmap -query 2>/dev/null) || return 1
+    layout=$(printf '%s\n' "$query" | sed -n 's/^layout:[[:space:]]*//p')
+    options=$(printf '%s\n' "$query" | sed -n 's/^options:[[:space:]]*//p')
+    [ "$layout" = "$LAYOUT" ] || return 0
+    printf '%s' "$options" | grep -q "$OPTION" || return 0
+    return 1
+}
+
+fix_layout() {
+    needs_fix || return 0
+    # Re-applying the map resets the active group to the first one. Remember
+    # what the user had so a hotplug does not silently switch them to English.
+    previous=$(xkb-switch -p 2>/dev/null)
+    if setxkbmap -layout "$LAYOUT" -option "$OPTION" 2>/dev/null; then
+        case "$previous" in
+            us | ru) xkb-switch -s "$previous" >/dev/null 2>&1 || true ;;
+        esac
+        log "restored $LAYOUT (lost after an input hotplug)"
+    else
+        log "could not restore $LAYOUT"
+    fi
+}
+
+# A FIFO keeps the event loop in this shell, so EXIT can stop the monitor and a
+# dead X server never leaves the guard (or the monitor) behind.
+FIFO=$RUNTIME/xkb-layout-guard.fifo
+rm -f "$FIFO"
+mkfifo "$FIFO" || exit 1
+sh -c "$EVENTS" >"$FIFO" 2>/dev/null 9>&- &
+monitor=$!
+trap 'kill "$monitor" 2>/dev/null; rm -f "$FIFO"' EXIT INT TERM HUP
+
+log "start $LAYOUT ($OPTION)"
+exec 3<"$FIFO"
+pending=0
+while IFS= read -r line <&3; do
+    case "$line" in
+        ACTION=add* | ACTION=remove* | ACTION=change*) pending=1 ;;
+        '')
+            if [ "$pending" = 1 ]; then
+                pending=0
+                sleep 0.4 # let Xorg finish rebuilding the keymap
+                if x_alive; then
+                    fix_layout
+                else
+                    log "X is gone, exiting"
+                    exit 0
+                fi
+            fi
+            ;;
+    esac
+done

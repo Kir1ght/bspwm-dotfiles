@@ -205,10 +205,26 @@ before copying.
 
 Media keys and Fn brightness keys are also bound in sxhkd.
 
-The `us/ru` layout is configured once per X session in `bspwmrc` (and in
-`xinitrc` for startx): `setxkbmap -layout us,ru -option grp:alt_shift_toggle`.
-Restarting `bspwmrc` does not reset the active layout. If `Alt + Shift` does
-not work, make sure the `xorg-setxkbmap` package is installed.
+The `us/ru` layout is configured in `bspwmrc` (and in `xinitrc` for startx):
+`setxkbmap -layout us,ru -option grp:alt_shift_toggle`. Restarting `bspwmrc`
+does not reset the active layout, because it applies the keymap only when the
+loaded one is actually wrong.
+
+A wireless mouse dongle also exposes keyboard devices, and every reconnect
+makes Xorg re-apply `/etc/X11/xorg.conf.d/00-keyboard.conf` to each keyboard.
+That file must therefore carry both groups; otherwise `ru` disappears
+mid-session. `install.sh` sets it with
+`localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle`. To fix an
+existing install, run the same command with `sudo`; it takes effect after the
+next login. `bin/xkb-layout-guard` is the safety net for the current session:
+it waits on udev (no polling) and restores the layout after a hotplug.
+
+If `Alt + Shift` still does not work, check:
+
+```bash
+setxkbmap -query    # layout: us,ru, options: grp:alt_shift_toggle
+xkb-switch -l      # must list us and ru
+```
 
 ## 🖼️ Wallpapers and palette
 

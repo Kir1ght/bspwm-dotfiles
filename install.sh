@@ -536,6 +536,19 @@ install_configs() {
         pkill -USR1 -x sxhkd 2>/dev/null || true
     fi
 
+    # The wireless dongle exposes keyboard devices, and Xorg re-applies this
+    # file to every keyboard on hotplug. It must therefore carry both groups
+    # itself; with only "us" the second layout disappears mid-session, and no
+    # bspwmrc reload fixes it until the user runs setxkbmap manually.
+    if command -v localectl >/dev/null 2>&1; then
+        if sudo localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle >/dev/null 2>&1; then
+            ok "System X11 keyboard layout: us,ru (Alt+Shift)"
+        else
+            warn "Could not set the system X11 keyboard layout. Run:"
+            warn "  sudo localectl set-x11-keymap us,ru pc105 \"\" grp:alt_shift_toggle"
+        fi
+    fi
+
     ok "Dotfiles installed. Backup: $BACKUP_DIR"
 }
 
