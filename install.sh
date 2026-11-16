@@ -416,6 +416,11 @@ install_configs() {
     # bspwm execs bspwmrc directly. Without the execute bit it silently skips
     # the whole config: no wallpaper, panel, compositor or hotkeys.
     chmod 755 "$HOME/.xinitrc" "$HOME/.config/bspwm/bspwmrc"
+    # Fail loudly instead of logging in to an empty desktop. A restore from a
+    # backup or a manual copy can drop the bit again.
+    for f in "$HOME/.xinitrc" "$HOME/.config/bspwm/bspwmrc"; do
+        [[ -x "$f" ]] || die "$f is not executable; bspwm would silently skip it"
+    done
 
     # Wallpapers live in two libraries. Existing files are not overwritten.
     mkdir -p "$HOME/Images/Wallpaper_desktop" "$HOME/Images/Wallpaper_lockscreen"

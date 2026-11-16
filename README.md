@@ -452,6 +452,24 @@ window is always the one you marked last.
 Scripts: `~/.local/bin/bspwm-drag-split` (mouse and touchpad) and
 `~/.local/bin/bspwm-split` (keyboard, also supports `status` and `--help`).
 
+## 🩺 Troubleshooting
+
+### Logged in, but the desktop is empty
+
+`bspwm` runs `~/.config/bspwm/bspwmrc` directly, so the file **must be
+executable**. Without the execute bit bspwm skips it *silently*: no wallpaper,
+no polybar, no picom, no hotkeys — just a bare screen, so it looks like the
+session failed to start. Check and fix:
+
+```bash
+ls -l ~/.config/bspwm/bspwmrc     # need -rwxr-xr-x
+chmod 755 ~/.config/bspwm/bspwmrc
+```
+
+Then log out and back in. Copying configs with `install -m644`, restoring from
+a backup, or a `git archive` extraction can all drop the bit. `install.sh`
+sets it and aborts if it is missing.
+
 ## 📝 Notes
 
 - Arch/CachyOS and X11 only; Wayland is not supported.
