@@ -283,25 +283,25 @@
 ; background = '#111111'
 ; foreground = '#33ffff'
 
-# --- Desktop theme (see ~/.config/alacritty/theme-colors.toml) ---------------
-# Background matches the terminal exactly, so the visualizer blends into the
-# window instead of sitting in its own box. Foreground is the accent colour
-# used for the current lyric line in sptlrx.
-background = '#131719'
-foreground = '#70cbeb'
+# --- Desktop theme -----------------------------------------------------------
+# Keep the terminal's own background and foreground, the same way any other
+# program drawn in a terminal does: no colour of its own, so the window looks
+# like the rest of the desktop and follows the theme.
+background = default
+foreground = default
 
 # Gradient mode, only hex defined colors are supported,
 # background must also be defined in hex or remain commented out. 1 = on, 0 = off.
 # You can define as many as 8 different colors. They range from bottom to top of the screen
-gradient = 1
-gradient_color_1 = '#2e393d'
-gradient_color_2 = '#46606a'
-gradient_color_3 = '#5a8b9c'
-gradient_color_4 = '#70cbeb'
-gradient_color_5 = '#87c0c5'
-gradient_color_6 = '#91d9f3'
-gradient_color_7 = '#8c9cd9'
-gradient_color_8 = '#a8b5e6'
+gradient = 0
+; gradient_color_1 = '#2e393d'
+; gradient_color_2 = '#46606a'
+; gradient_color_3 = '#5a8b9c'
+; gradient_color_4 = '#70cbeb'
+; gradient_color_5 = '#87c0c5'
+; gradient_color_6 = '#91d9f3'
+; gradient_color_7 = '#8c9cd9'
+; gradient_color_8 = '#a8b5e6'
 
 # Horizontal is only supported on noncurses output.
 # Only one color will be calculated per bar.
