@@ -1,0 +1,68 @@
+# sptlrx — synchronized lyrics in the terminal
+#
+# Player is MPRIS, so it follows whatever is playing (chromium, mpv, spotifyd,
+# ncspot, ...) without logging in anywhere. Lyrics come from lrclib.net, which
+# is sptlrx's built-in provider — v1.3.1 has no `host` key, the URL is compiled
+# in. lrclib serves Cyrillic titles fine.
+#
+# Colours are taken from the current Alacritty palette
+# (~/.config/alacritty/theme-colors.toml, generated from the wallpaper):
+#   background #131719   foreground #eceeee
+#   blue       #70cbeb   magenta    #8c9cd9   cyan #87c0c5
+# The active line is the bright accent (blue); everything else fades into the
+# background so the eye lands on the line being sung.
+player: mpris
+ignoreErrors: true
+timerInterval: 200
+updateInterval: 2000
+
+style:
+  hAlignment: center
+  # Already-sung lines: dim grey, barely above the background.
+  before:
+    background: ""
+    foreground: "#8f9ea3"
+    bold: false
+    italic: false
+    underline: false
+    strikethrough: false
+    blink: false
+    faint: true
+  # The line being sung: bright accent + bold.
+  current:
+    background: ""
+    foreground: "#70cbeb"
+    bold: true
+    italic: false
+    underline: false
+    strikethrough: false
+    blink: false
+    faint: false
+  # Upcoming lines: same dim grey as `before`, so the layout stays calm.
+  after:
+    background: ""
+    foreground: "#8f9ea3"
+    bold: false
+    italic: false
+    underline: false
+    strikethrough: false
+    blink: false
+    faint: true
+
+pipe:
+  length: 0
+  overflow: word
+
+mpd:
+  address: 127.0.0.1:6600
+  password: ""
+mopidy:
+  address: 127.0.0.1:6680
+mpris:
+  # Empty = use the first available player. Fill in e.g. [chromium, spotify]
+  # to pin one when several are running.
+  players: []
+browser:
+  port: 8974
+local:
+  folder: ""

@@ -1,0 +1,172 @@
+#!/bin/sh
+# music-tui — synchronized lyrics (sptlrx) with a cava visualizer, in one
+# window of the desktop terminal, sized for reading from across the room.
+#
+# Layout:
+#   +----------------------------------+
+#   |                                  |
+#   |        the line being sung       |   sptlrx, larger font, accent colour
+#   |                                  |
+#   |  ▁▂▃▅▇█▇▅▃▂▁▂▃▅▇▆▄▂▁▂▃▅▆▇█▇▅▃▂▁   |   cava, same palette
+#   +----------------------------------+
+#
+# sptlrx and cava both need a tty, so they run in a tmux session that the
+# Alacritty window attaches to. The session lives on its own tmux socket
+# (-L music-tui), so it never touches an existing tmux server or its options,
+# and it is destroyed when the window closes.
+#
+# Usage: music-tui [-n] [-f SIZE] [-p PLAYER]
+#   -n  lyrics only, no cava
+#   -f  font size for this window (default 26)
+#   -p  MPRIS player name to follow, e.g. chromium (default: first available)
+export LC_ALL=C.UTF-8
+export LANG=${LANG:-C.UTF-8}
+
+SOCKET=music-tui
+SESSION=music
+FONT_SIZE=26
+WITH_CAVA=1
+PLAYER=""
+
+usage() {
+    # Print the header comment block: from line 2 to the first non-comment line.
+    sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+while getopts 'nf:p:h' opt; do
+    case "$opt" in
+        n) WITH_CAVA=0 ;;
+        f) FONT_SIZE=$OPTARG ;;
+        p) PLAYER=$OPTARG ;;
+        h) usage 0 ;;
+        *) usage 1 ;;
+    esac
+done
+
+die() {
+    notify-send -u critical "music-tui" "$*" 2>/dev/null ||
+        printf 'music-tui: %s\n' "$*" >&2
+    exit 1
+}
+
+for bin in alacritty sptlrx tmux; do
+    command -v "$bin" >/dev/null 2>&1 || die "$bin is not installed"
+done
+if [ "$WITH_CAVA" -eq 1 ]; then
+    command -v cava >/dev/null 2>&1 || die "cava is not installed"
+fi
+
+# Make the window float in the middle of the monitor instead of being tiled
+# into a narrow column. bspwm applies a rule when the window is mapped, so the
+# geometry is computed here and registered as a rule right before the launch.
+# 72% of the usable area (monitor minus polybar padding) is comfortable for a
+# 26pt font: enough for long lyric lines, not a full-screen wall of text.
+if command -v bspc >/dev/null 2>&1 && [ -n "$DISPLAY" ]; then
+    rect=$(bspc query -T -m 2>/dev/null | python3 -c '
+import json, sys
+
+mon = json.load(sys.stdin)
+r, p = mon["rectangle"], mon["padding"]
+x, y = r["x"] + p["left"], r["y"] + p["top"]
+w = r["width"] - p["left"] - p["right"]
+h = r["height"] - p["top"] - p["bottom"]
+win_w, win_h = int(w * 0.72), int(h * 0.72)
+print(f"{win_w}x{win_h}+{x + (w - win_w) // 2}+{y + (h - win_h) // 2}")
+' 2>/dev/null)
+    if [ -n "$rect" ]; then
+        bspc rule -r 'music-tui:music-tui:*' >/dev/null 2>&1
+        bspc rule -a 'music-tui:music-tui:*' \
+            state=floating border=off rectangle="$rect" >/dev/null 2>&1
+    fi
+fi
+
+# Alacritty flags: bigger font, no padding, no decorations, opaque window.
+# Colours come from the normal config, so the window matches the theme.
+set -- \
+    -o "font.size=$FONT_SIZE" \
+    -o 'window.padding.x=0' \
+    -o 'window.padding.y=0' \
+    -o 'window.dynamic_padding=false' \
+    -o 'window.decorations="none"' \
+    -o 'window.opacity=1.0' \
+    --class music-tui,music-tui \
+    -T 'music-tui'
+
+# sptlrx --player selects the player *backend* (mpris), not a single MPRIS
+# name. Pinning one name means editing mpris.players, so a copy of the config
+# is used for that case and the real config stays untouched.
+CONF="$HOME/.config/sptlrx/config.yaml"
+if [ -n "$PLAYER" ]; then
+    CONF="${XDG_RUNTIME_DIR:-/tmp}/music-tui-sptlrx.yaml"
+    awk -v p="$PLAYER" '
+        /^mpris:/ { inmpris = 1 }
+        inmpris && /^  players:/ { print "  players: [\"" p "\"]"; next }
+        { print }
+    ' "$HOME/.config/sptlrx/config.yaml" >"$CONF" || die "cannot prepare config"
+fi
+LYRICS="sptlrx --player mpris --config '$CONF'"
+
+T() {
+    tmux -L "$SOCKET" "$@"
+}
+
+# Find an existing music-tui window, so a second launch focuses it instead of
+# opening a duplicate view of the same session.
+existing_window() {
+    command -v bspc >/dev/null 2>&1 || return 1
+    for n in $(bspc query -N -n .window 2>/dev/null); do
+        case "$(xprop -id "$n" WM_CLASS 2>/dev/null)" in
+            *music-tui*) printf '%s\n' "$n"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+if T has-session -t "$SESSION" 2>/dev/null; then
+    # Already running: raise the window we already have.
+    if win=$(existing_window); then
+        bspc node "$win" --focus >/dev/null 2>&1
+        exit 0
+    fi
+    exec alacritty "$@" -e tmux -L "$SOCKET" attach -t "$SESSION"
+fi
+
+# Build the session detached, then attach with the window. Options are set
+# before any client connects, so nothing flickers.
+T new-session -d -s "$SESSION" -c "$HOME" "$LYRICS" || die "could not start tmux"
+T set-option -g status off
+T set-option -g pane-border-status off
+T set-option -g window-size latest
+T set-option -g remain-on-exit off
+T set-option -g escape-time 10
+T set-option -g default-terminal tmux-256color
+T set-option -ga terminal-features ',*:RGB'
+T set-environment -g LANG C.UTF-8
+T set-environment -g LC_ALL C.UTF-8
+# The session is built detached, so destroy-unattached cannot be set up front
+# (it would kill it before the window attaches). Turn it on at the first
+# attach: closing the window then takes the private tmux server with it.
+T set-hook -g client-attached 'set-option -g destroy-unattached on'
+
+if [ "$WITH_CAVA" -eq 1 ]; then
+    # 8 lines of cava under the lyrics; the lyrics pane keeps the rest.
+    # The divider is a single blank line: pane-border-lines and both border
+    # styles are neutralised so no green default border shows through.
+    T split-window -v -l 8 -t "$SESSION" 'cava'
+    T set-option -g pane-border-style 'fg=#131719,bg=#131719'
+    T set-option -g pane-active-border-style 'fg=#131719,bg=#131719'
+    T set-option -g pane-border-lines single
+    T select-pane -t "$SESSION":0.0
+    # Keep cava at 8 lines no matter how the window is resized: without this
+    # the split drifts when the client attaches or the window changes size.
+    # -a appends to the hook set above instead of replacing it.
+    T set-hook -ga client-attached \
+        "resize-pane -t $SESSION:0.1 -y 8"
+    T set-hook -g client-resized \
+        "resize-pane -t $SESSION:0.1 -y 8"
+fi
+
+# Attach the window to the private server. The client-attached hook above
+# enables destroy-unattached, so closing the window stops sptlrx and cava.
+exec alacritty "$@" -e tmux -L "$SOCKET" attach -t "$SESSION"

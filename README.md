@@ -132,6 +132,25 @@ prime-run <command>
 models are not stored in git; `./install.sh --with-whisper` downloads them.
 Media keys work through `playerctl` with an `mpd` fallback.
 
+### 🎵 Lyrics in the terminal
+
+`Super + M` opens `music-tui`: time-synchronized lyrics from
+[lrclib.net](https://lrclib.net) via `sptlrx`, with a `cava` visualizer
+underneath, in a floating borderless window with a larger font. The window is
+centered at 72% of the monitor and both halves share the wallpaper palette, so
+the active lyric line is the same accent blue as the focused window border.
+
+```bash
+music-tui            # lyrics + cava
+music-tui -n         # lyrics only
+music-tui -f 32      # bigger font
+music-tui -p chromium  # follow one MPRIS player
+```
+
+`sptlrx` follows any MPRIS source (browser, mpv, spotifyd, ncspot), so nothing
+needs to be logged in. Lyrics colours live in `config/sptlrx/config.yaml`;
+the cava gradient lives in the `[color]` section of `config/cava/config`.
+
 ## 📸 Screenshots
 
 | Fastfetch | Cava |
@@ -180,6 +199,7 @@ before copying.
 | Shortcut | Action |
 |---|---|
 | `Super + T` / `W` / `E` | terminal, Firefox, Thunar |
+| `Super + M` | lyrics in the terminal (`music-tui`) |
 | `Super + Space` | rofi |
 | `Super + Q` | close the focused window |
 | `Super + 1…9` | switch desktop |

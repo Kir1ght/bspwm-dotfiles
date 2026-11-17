@@ -130,6 +130,26 @@ prime-run <команда>
 Модели Whisper не лежат в git, их скачивает `./install.sh --with-whisper`.
 Медиа-клавиши работают через `playerctl` с запасным вариантом на `mpd`.
 
+### 🎵 Тексты песен в терминале
+
+`Super + M` открывает `music-tui`: синхронизированные по времени тексты с
+[lrclib.net](https://lrclib.net) через `sptlrx` и визуализатор `cava` снизу,
+в плавающем окне без рамок и с увеличенным шрифтом. Окно центрируется и
+занимает 72% монитора, обе половины берут цвета из палитры обоев, поэтому
+активная строка подсвечена тем же акцентом, что и рамка активного окна.
+
+```bash
+music-tui              # тексты + cava
+music-tui -n           # только тексты
+music-tui -f 32        # крупнее шрифт
+music-tui -p chromium  # следовать за одним MPRIS-плеером
+```
+
+`sptlrx` работает с любым источником MPRIS (браузер, mpv, spotifyd, ncspot),
+поэтому нигде не нужно авторизоваться. Цвета текста заданы в
+`config/sptlrx/config.yaml`, градиент cava — в секции `[color]` файла
+`config/cava/config`.
+
 ## 📸 Скриншоты
 
 | Fastfetch | Cava |
@@ -178,6 +198,7 @@ curl -fsSL https://raw.githubusercontent.com/Kir1ght/bspwm-dotfiles/main/bootstr
 | Комбинация | Действие |
 |---|---|
 | `Super + T` / `W` / `E` | терминал, Firefox, Thunar |
+| `Super + M` | тексты песен в терминале (`music-tui`) |
 | `Super + Space` | rofi |
 | `Super + Q` | закрыть окно |
 | `Super + 1…9` | рабочий стол |
