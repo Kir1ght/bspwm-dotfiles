@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -509,11 +510,16 @@ def terminal_size():
 
 
 def draw(lines, rows, columns):
-    """Draw the art block in the middle of the window."""
+    """Draw the art block in the middle of the window.
+
+    Each row is erased before it is written, so a frame can never be mixed with
+    what was on screen before: a window that was dragged or resized by the
+    compositor comes back clean instead of showing half of two frames.
+    """
     top = max(0, (rows - len(lines)) // 2)
     out = [CLEAR, HIDE_CURSOR, FOREGROUND]
     for offset, line in enumerate(lines[:rows]):
-        out.append(f"\x1b[{top + offset + 1};1H")
+        out.append(f"\x1b[{top + offset + 1};1H\x1b[2K")
         out.append(line[:columns] + RESET)
     sys.stdout.write("".join(out))
     sys.stdout.flush()
@@ -535,34 +541,53 @@ def run():
     clock = Clock()
     lyrics = Lyrics()
     signature = None
+    size = (0, 0)
+    painted = 0.0
+    # Set on SIGWINCH, so a window that is resized or moved redraws at once
+    # instead of waiting for the next word.
+    resized = {"flag": True}
+
+    def on_winch(signum, frame):
+        resized["flag"] = True
+
+    try:
+        signal.signal(signal.SIGWINCH, on_winch)
+    except (AttributeError, ValueError):
+        pass
 
     try:
         while True:
             state = clock.read()
+            now = time.monotonic()
 
             if state is None:
+                index = -1
                 frame = ("idle",)
-                if frame != signature:
-                    rows, columns = terminal_size()
-                    draw(art("♪", columns, rows), rows, columns)
-                    signature = frame
-                time.sleep(0.4)
-                continue
+            else:
+                lyrics.load(state["artist"], state["title"], state["duration"])
+                index = lyrics.at(state["position"])
+                frame = (index, state["title"], state["status"])
 
-            lyrics.load(state["artist"], state["title"], state["duration"])
-            index = lyrics.at(state["position"])
             rows, columns = terminal_size()
+            if (rows, columns) != size:
+                size = (rows, columns)
+                resized["flag"] = True
 
-            lines = []
-            if index >= 0:
-                lines = art(lyrics.ready[0][index][2], columns, rows)
-            if not lines:
-                lines = art("♪", columns, rows)
-
-            frame = (index, state["title"], state["status"], rows, columns)
-            if frame != signature:
+            # Repaint when the words change, when the window was moved or
+            # resized, and now and then anyway: a terminal can lose part of its
+            # content while a window is dragged, and a stale frame must not be
+            # left on screen until the next word happens to be sung.
+            if frame != signature or resized["flag"] or now - painted >= 1.0:
+                lines = []
+                if index >= 0:
+                    lines = art(lyrics.ready[0][index][2], columns, rows)
+                if not lines:
+                    lines = art("♪", columns, rows)
                 draw(lines, rows, columns)
                 signature = frame
+                painted = now
+                resized["flag"] = False
+
             time.sleep(0.05)
     except KeyboardInterrupt:
         pass
@@ -617,9 +642,6 @@ def launch():
         "window.dynamic_padding=false",
         "-o",
         'window.decorations="none"',
-        # Solid, unlike the slightly transparent terminal: a see-through
-        # window would mix the lyrics with whatever is behind it.
-        "window.opacity=1.0",
         "--class",
         "music-tui,music-tui",
         "-T",
