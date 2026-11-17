@@ -43,6 +43,10 @@ SHOW_CURSOR = "\x1b[?25h"
 # Without this a long line wraps, the frame scrolls and the window looks empty.
 NO_WRAP = "\x1b[?7l"
 WRAP = "\x1b[?7h"
+# The alternate screen has no scrollback, so the mouse wheel cannot drag the
+# words off the window and nothing can be left over from an earlier frame.
+ALT_ON = "\x1b[?1049h"
+ALT_OFF = "\x1b[?1049l"
 
 
 # --------------------------------------------------------------------------- #
@@ -529,7 +533,7 @@ def draw(lines, rows, columns):
 # Main loop
 # --------------------------------------------------------------------------- #
 def run():
-    sys.stdout.write(HIDE_CURSOR + NO_WRAP + CLEAR)
+    sys.stdout.write(ALT_ON + HIDE_CURSOR + NO_WRAP + CLEAR)
     sys.stdout.flush()
 
     if ImageFont is None or not has_fonts():
@@ -592,7 +596,7 @@ def run():
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stdout.write(WRAP + SHOW_CURSOR + RESET)
+        sys.stdout.write(WRAP + SHOW_CURSOR + RESET + ALT_OFF)
         sys.stdout.flush()
 
 
