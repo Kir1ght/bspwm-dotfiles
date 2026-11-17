@@ -45,10 +45,6 @@ super + shift + w
 super + e
     thunar
 
-# Music TUI: synchronized lyrics + cava in a floating window (M = Music)
-super + m
-    music-tui
-
 # Toggle Polybar (B = Bar)
 super + b
     ~/bin/toggle-polybar

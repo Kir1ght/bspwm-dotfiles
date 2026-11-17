@@ -155,7 +155,7 @@ PACMAN_CORE=(
     # documents / music / media
     zathura zathura-pdf-mupdf zathura-djvu mpd mpc ncmpcpp cava ranger ueberzug
     # lyrics in the terminal (music-tui)
-    tmux playerctl
+    playerctl
     # CLI / editors / utilities
     lsd bat micro neovim tree fastfetch btop htop git base-devel
     curl wget rsync pciutils python-pillow
@@ -195,7 +195,7 @@ MULTILIB_PKGS=(
 
 AUR_CORE=(
     greenclip light rofi-bluetooth-git throne-bin ttf-symbola ttf-ms-fonts
-    v2raya-bin upscayl-bin sptlrx-bin
+    v2raya-bin upscayl-bin
 )
 
 AUR_APPS=(

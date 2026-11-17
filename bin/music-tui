@@ -1,172 +1,521 @@
-#!/bin/sh
-# music-tui — synchronized lyrics (sptlrx) with a cava visualizer, in one
-# window of the desktop terminal, sized for reading from across the room.
-#
-# Layout:
-#   +----------------------------------+
-#   |                                  |
-#   |        the line being sung       |   sptlrx, larger font, accent colour
-#   |                                  |
-#   |  ▁▂▃▅▇█▇▅▃▂▁▂▃▅▇▆▄▂▁▂▃▅▆▇█▇▅▃▂▁   |   cava, same palette
-#   +----------------------------------+
-#
-# sptlrx and cava both need a tty, so they run in a tmux session that the
-# Alacritty window attaches to. The session lives on its own tmux socket
-# (-L music-tui), so it never touches an existing tmux server or its options,
-# and it is destroyed when the window closes.
-#
-# Usage: music-tui [-n] [-f SIZE] [-p PLAYER]
-#   -n  lyrics only, no cava
-#   -f  font size for this window (default 26)
-#   -p  MPRIS player name to follow, e.g. chromium (default: first available)
-export LC_ALL=C.UTF-8
-export LANG=${LANG:-C.UTF-8}
+#!/usr/bin/env python3
+"""music-tui — synchronized lyrics, one or two words at a time.
 
-SOCKET=music-tui
-SESSION=music
-FONT_SIZE=26
-WITH_CAVA=1
-PLAYER=""
+Run `music-tui` from any terminal. It opens a borderless window with a large
+font and shows only the words being sung: the active word in the accent colour
+and the next one dimmed. Nothing else is drawn.
 
-usage() {
-    # Print the header comment block: from line 2 to the first non-comment line.
-    sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
-    exit "${1:-0}"
-}
+Lyrics come from lrclib.net (no account needed) and the position from any
+MPRIS player through playerctl, so it follows whatever is playing. Colours are
+read from the current Alacritty theme, so the window matches the desktop.
+"""
 
-while getopts 'nf:p:h' opt; do
-    case "$opt" in
-        n) WITH_CAVA=0 ;;
-        f) FONT_SIZE=$OPTARG ;;
-        p) PLAYER=$OPTARG ;;
-        h) usage 0 ;;
-        *) usage 1 ;;
-    esac
-done
+import bisect
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 
-die() {
-    notify-send -u critical "music-tui" "$*" 2>/dev/null ||
-        printf 'music-tui: %s\n' "$*" >&2
-    exit 1
-}
+# Internal marker: set when the script re-launches itself inside the window.
+INNER = "MUSIC_TUI_INNER"
+FONT_SIZE = 64
+CACHE_DIR = os.path.expanduser("~/.cache/music-tui")
+USER_AGENT = "music-tui (https://github.com/Kir1ght/bspwm-dotfiles)"
 
-for bin in alacritty sptlrx tmux; do
-    command -v "$bin" >/dev/null 2>&1 || die "$bin is not installed"
-done
-if [ "$WITH_CAVA" -eq 1 ]; then
-    command -v cava >/dev/null 2>&1 || die "cava is not installed"
-fi
 
-# Make the window float in the middle of the monitor instead of being tiled
-# into a narrow column. bspwm applies a rule when the window is mapped, so the
-# geometry is computed here and registered as a rule right before the launch.
-# 72% of the usable area (monitor minus polybar padding) is comfortable for a
-# 26pt font: enough for long lyric lines, not a full-screen wall of text.
-if command -v bspc >/dev/null 2>&1 && [ -n "$DISPLAY" ]; then
-    rect=$(bspc query -T -m 2>/dev/null | python3 -c '
-import json, sys
+# --------------------------------------------------------------------------- #
+# Palette
+# --------------------------------------------------------------------------- #
+def read_palette():
+    """Colours of the active terminal theme, with sane fallbacks."""
+    palette = {
+        "background": "#131719",
+        "foreground": "#eceeee",
+        "accent": "#70cbeb",
+        "dim": "#8f9ea3",
+        "faint": "#2e393d",
+    }
+    path = os.path.expanduser("~/.config/alacritty/theme-colors.toml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return palette
 
-mon = json.load(sys.stdin)
-r, p = mon["rectangle"], mon["padding"]
-x, y = r["x"] + p["left"], r["y"] + p["top"]
-w = r["width"] - p["left"] - p["right"]
-h = r["height"] - p["top"] - p["bottom"]
-win_w, win_h = int(w * 0.72), int(h * 0.72)
-print(f"{win_w}x{win_h}+{x + (w - win_w) // 2}+{y + (h - win_h) // 2}")
-' 2>/dev/null)
-    if [ -n "$rect" ]; then
-        bspc rule -r 'music-tui:music-tui:*' >/dev/null 2>&1
-        bspc rule -a 'music-tui:music-tui:*' \
-            state=floating border=off rectangle="$rect" >/dev/null 2>&1
-    fi
-fi
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            section = line.strip("[]").replace("colors.", "")
+            continue
+        match = re.match(r'(\w+)\s*=\s*"(#[0-9a-fA-F]{6})"', line)
+        if not match:
+            continue
+        name, value = match.group(1), match.group(2)
+        if section == "primary":
+            if name == "background":
+                palette["background"] = value
+            elif name == "foreground":
+                palette["foreground"] = value
+        elif section == "normal" and name == "blue":
+            palette["accent"] = value
+        elif section == "bright" and name == "black":
+            palette["dim"] = value
+        elif section == "selection" and name == "background":
+            palette["faint"] = value
+    return palette
 
-# Alacritty flags: bigger font, no padding, no decorations, opaque window.
-# Colours come from the normal config, so the window matches the theme.
-set -- \
-    -o "font.size=$FONT_SIZE" \
-    -o 'window.padding.x=0' \
-    -o 'window.padding.y=0' \
-    -o 'window.dynamic_padding=false' \
-    -o 'window.decorations="none"' \
-    -o 'window.opacity=1.0' \
-    --class music-tui,music-tui \
-    -T 'music-tui'
 
-# sptlrx --player selects the player *backend* (mpris), not a single MPRIS
-# name. Pinning one name means editing mpris.players, so a copy of the config
-# is used for that case and the real config stays untouched.
-CONF="$HOME/.config/sptlrx/config.yaml"
-if [ -n "$PLAYER" ]; then
-    CONF="${XDG_RUNTIME_DIR:-/tmp}/music-tui-sptlrx.yaml"
-    awk -v p="$PLAYER" '
-        /^mpris:/ { inmpris = 1 }
-        inmpris && /^  players:/ { print "  players: [\"" p "\"]"; next }
-        { print }
-    ' "$HOME/.config/sptlrx/config.yaml" >"$CONF" || die "cannot prepare config"
-fi
-LYRICS="sptlrx --player mpris --config '$CONF'"
+def rgb(color):
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
 
-T() {
-    tmux -L "$SOCKET" "$@"
-}
 
-# Find an existing music-tui window, so a second launch focuses it instead of
-# opening a duplicate view of the same session.
-existing_window() {
-    command -v bspc >/dev/null 2>&1 || return 1
-    for n in $(bspc query -N -n .window 2>/dev/null); do
-        case "$(xprop -id "$n" WM_CLASS 2>/dev/null)" in
-            *music-tui*) printf '%s\n' "$n"; return 0 ;;
-        esac
-    done
-    return 1
-}
+def fg(color, bold=False):
+    r, g, b = rgb(color)
+    return f"\x1b[{'1;' if bold else ''}38;2;{r};{g};{b}m"
 
-if T has-session -t "$SESSION" 2>/dev/null; then
-    # Already running: raise the window we already have.
-    if win=$(existing_window); then
-        bspc node "$win" --focus >/dev/null 2>&1
-        exit 0
-    fi
-    exec alacritty "$@" -e tmux -L "$SOCKET" attach -t "$SESSION"
-fi
 
-# Build the session detached, then attach with the window. Options are set
-# before any client connects, so nothing flickers.
-T new-session -d -s "$SESSION" -c "$HOME" "$LYRICS" || die "could not start tmux"
-T set-option -g status off
-T set-option -g pane-border-status off
-T set-option -g window-size latest
-T set-option -g remain-on-exit off
-T set-option -g escape-time 10
-T set-option -g default-terminal tmux-256color
-T set-option -ga terminal-features ',*:RGB'
-T set-environment -g LANG C.UTF-8
-T set-environment -g LC_ALL C.UTF-8
-# The session is built detached, so destroy-unattached cannot be set up front
-# (it would kill it before the window attaches). Turn it on at the first
-# attach: closing the window then takes the private tmux server with it.
-T set-hook -g client-attached 'set-option -g destroy-unattached on'
+def blend(color, other, amount):
+    """Mix two hex colours; `amount` is how much of `color` to keep."""
+    (r1, g1, b1), (r2, g2, b2) = rgb(color), rgb(other)
+    return "#%02x%02x%02x" % (
+        round(r1 * amount + r2 * (1 - amount)),
+        round(g1 * amount + g2 * (1 - amount)),
+        round(b1 * amount + b2 * (1 - amount)),
+    )
 
-if [ "$WITH_CAVA" -eq 1 ]; then
-    # 8 lines of cava under the lyrics; the lyrics pane keeps the rest.
-    # The divider is a single blank line: pane-border-lines and both border
-    # styles are neutralised so no green default border shows through.
-    T split-window -v -l 8 -t "$SESSION" 'cava'
-    T set-option -g pane-border-style 'fg=#131719,bg=#131719'
-    T set-option -g pane-active-border-style 'fg=#131719,bg=#131719'
-    T set-option -g pane-border-lines single
-    T select-pane -t "$SESSION":0.0
-    # Keep cava at 8 lines no matter how the window is resized: without this
-    # the split drifts when the client attaches or the window changes size.
-    # -a appends to the hook set above instead of replacing it.
-    T set-hook -ga client-attached \
-        "resize-pane -t $SESSION:0.1 -y 8"
-    T set-hook -g client-resized \
-        "resize-pane -t $SESSION:0.1 -y 8"
-fi
 
-# Attach the window to the private server. The client-attached hook above
-# enables destroy-unattached, so closing the window stops sptlrx and cava.
-exec alacritty "$@" -e tmux -L "$SOCKET" attach -t "$SESSION"
+RESET = "\x1b[0m"
+CLEAR = "\x1b[H\x1b[2J"
+HIDE_CURSOR = "\x1b[?25l"
+SHOW_CURSOR = "\x1b[?25h"
+# Without this a long line wraps, the frame scrolls and the window looks empty.
+NO_WRAP = "\x1b[?7l"
+WRAP = "\x1b[?7h"
+
+
+# --------------------------------------------------------------------------- #
+# Player
+# --------------------------------------------------------------------------- #
+FORMAT = "\x1f".join(
+    ["{{status}}", "{{artist}}", "{{title}}", "{{mpris:length}}", "{{position}}"]
+)
+
+
+def player_state():
+    """Return (status, artist, title, duration, position) in seconds."""
+    try:
+        out = subprocess.run(
+            ["playerctl", "metadata", "--format", FORMAT],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    parts = out.stdout.rstrip("\n").split("\x1f")
+    if len(parts) < 5:
+        return None
+    status, artist, title, length, position = parts[:5]
+    return {
+        "status": status.strip(),
+        "artist": artist.strip(),
+        "title": title.strip(),
+        "duration": micro(length),
+        "position": micro(position),
+    }
+
+
+def micro(value):
+    try:
+        return int(value) / 1_000_000
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Lyrics
+# --------------------------------------------------------------------------- #
+def http_json(url):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def fetch_synced(artist, title):
+    """Time-synced lyrics from lrclib.net, cached per track."""
+    if not artist or not title:
+        return None
+    key = hashlib.sha1(f"{artist}\x00{title}".encode()).hexdigest()
+    path = os.path.join(CACHE_DIR, key + ".json")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh).get("synced")
+        except (OSError, ValueError):
+            pass
+
+    synced = None
+    queries = [
+        {"artist_name": artist, "track_name": title},
+        {"q": f"{artist} {title}"},
+    ]
+    for params in queries:
+        endpoint = "search" if "q" in params else "get"
+        url = f"https://lrclib.net/api/{endpoint}?" + urllib.parse.urlencode(params)
+        try:
+            data = http_json(url)
+        except (urllib.error.URLError, ValueError, OSError):
+            continue
+        if isinstance(data, list):
+            for item in data:
+                if item.get("syncedLyrics"):
+                    synced = item["syncedLyrics"]
+                    break
+        elif isinstance(data, dict):
+            synced = data.get("syncedLyrics")
+        if synced:
+            break
+
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"artist": artist, "title": title, "synced": synced}, fh)
+    except OSError:
+        pass
+    return synced
+
+
+STAMP = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+
+
+def parse_lrc(text):
+    """LRC text -> [(seconds, line)] sorted by time."""
+    lines = []
+    for raw in text.splitlines():
+        stamps = STAMP.findall(raw)
+        if not stamps:
+            continue
+        lyric = STAMP.sub("", raw).strip()
+        for minutes, seconds in stamps:
+            lines.append((int(minutes) * 60 + float(seconds), lyric))
+    lines.sort(key=lambda item: item[0])
+    return lines
+
+
+def word_schedule(lines, duration):
+    """[(start, end, word)] for the whole song.
+
+    lrclib only gives one timestamp per line, so a line's duration is spread
+    over its words by length. Close enough to read along with.
+    """
+    words = []
+    for index, (start, text) in enumerate(lines):
+        if index + 1 < len(lines):
+            end = lines[index + 1][0]
+        else:
+            end = min(start + 6.0, duration or start + 6.0)
+        parts = text.split()
+        if not parts:
+            continue
+        weights = [len(part) + 1 for part in parts]
+        total = sum(weights)
+        span = max(0.3, end - start)
+        moment = start
+        for part, weight in zip(parts, weights):
+            step = span * weight / total
+            words.append((moment, moment + step, part))
+            moment += step
+    return words
+
+
+class Lyrics:
+    """Lyrics of the current track, reloaded when the track changes."""
+
+    def __init__(self):
+        self.key = None
+        self.words = []
+        self.starts = []
+        self.error = False
+
+    def load(self, artist, title, duration):
+        key = (artist, title)
+        if key == self.key:
+            return
+        self.key = key
+        self.words = []
+        self.starts = []
+        self.error = False
+        synced = fetch_synced(artist, title)
+        if not synced:
+            self.error = True
+            return
+        self.words = word_schedule(parse_lrc(synced), duration)
+        self.starts = [word[0] for word in self.words]
+        self.error = not self.words
+
+    def at(self, position):
+        """Index of the word being sung, or -1 before the first one."""
+        if not self.words:
+            return -1
+        index = bisect.bisect_right(self.starts, position) - 1
+        return max(-1, min(index, len(self.words) - 1))
+
+
+# --------------------------------------------------------------------------- #
+# Drawing
+# --------------------------------------------------------------------------- #
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def terminal_size():
+    """(rows, columns) of the real terminal, never the environment fallback."""
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            size = os.get_terminal_size(stream.fileno())
+        except (OSError, ValueError, AttributeError):
+            continue
+        if size.columns > 0 and size.lines > 0:
+            return size.lines, size.columns
+    return 24, 80
+
+
+def width(text):
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def clip(text, limit):
+    """Cut styled text to at most `limit` columns, keeping escapes valid."""
+    tokens = []
+    total = 0
+    for part in ANSI.split(text):
+        if not part:
+            continue
+        if part.startswith("\x1b"):
+            tokens.append((part, 0))
+        else:
+            tokens.append((part, width(part)))
+            total += width(part)
+    if total <= limit:
+        return text
+
+    out = []
+    used = 0
+    room = max(0, limit - 1)  # one cell for the ellipsis
+    for part, part_width in tokens:
+        if part_width == 0:
+            out.append(part)
+            continue
+        if used + part_width <= room:
+            out.append(part)
+            used += part_width
+            continue
+        for ch in part:
+            step = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if used + step > room:
+                break
+            out.append(ch)
+            used += step
+        break
+    return "".join(out) + "…" + RESET
+
+
+def centre(text, columns):
+    plain = ANSI.sub("", text)
+    if width(plain) > columns:
+        text = clip(text, columns)
+        plain = ANSI.sub("", text)
+    pad = max(0, (columns - width(plain)) // 2)
+    return " " * pad + text
+
+
+def draw(palette, rows, columns, top, middle, bottom):
+    """Full-frame redraw; only called when the visible word changes.
+
+    Every line is placed at an absolute row and clipped to the width, so a long
+    title can never wrap the frame off screen.
+    """
+    mid = rows // 2
+    lines = {mid: middle}
+    if top:
+        lines[mid - 2] = top
+    if bottom:
+        lines[mid + 2] = bottom
+
+    out = [CLEAR, HIDE_CURSOR]
+    for row in sorted(lines):
+        text = lines[row]
+        if not text or not 0 <= row < rows:
+            continue
+        out.append(f"\x1b[{row + 1};1H")
+        out.append(centre(text, columns) + "\x1b[K")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+def show_idle(palette, message, detail=""):
+    rows, columns = terminal_size()
+    draw(
+        palette,
+        rows,
+        columns,
+        "",
+        fg(palette["dim"]) + message + RESET,
+        fg(palette["faint"]) + detail + RESET if detail else "",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Main loop
+# --------------------------------------------------------------------------- #
+def run():
+    palette = read_palette()
+    sys.stdout.write(HIDE_CURSOR + NO_WRAP + CLEAR)
+    sys.stdout.flush()
+
+    lyrics = Lyrics()
+    signature = None
+    missing_player = False
+
+    try:
+        while True:
+            state = player_state()
+
+            if state is None:
+                if not missing_player:
+                    show_idle(palette, "♪")
+                    missing_player = True
+                    signature = None
+                time.sleep(0.5)
+                continue
+            missing_player = False
+
+            lyrics.load(state["artist"], state["title"], state["duration"])
+            index = lyrics.at(state["position"])
+
+            # Colours derived from the theme: the word being sung is bright, the
+            # next one is quiet.
+            soon = blend(palette["foreground"], palette["background"], 0.55)
+
+            if lyrics.error or index < 0:
+                top = bottom = ""
+                middle = fg(soon) + "♪" + RESET
+            else:
+                current = lyrics.words[index][2]
+                following = (
+                    lyrics.words[index + 1][2]
+                    if index + 1 < len(lyrics.words)
+                    else ""
+                )
+                top = bottom = ""
+                middle = fg(palette["accent"], bold=True) + current + RESET
+                if following:
+                    middle += " " + fg(soon) + following + RESET
+
+            playing = state["status"] == "Playing"
+            size = terminal_size()
+            frame = (index, state["title"], playing, size)
+            if frame != signature:
+                rows, columns = size
+                if not playing:
+                    middle = fg(soon) + ANSI.sub("", middle) + RESET
+                draw(palette, rows, columns, top, middle, bottom)
+                signature = frame
+            time.sleep(0.08)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write(WRAP + SHOW_CURSOR + RESET)
+        sys.stdout.flush()
+
+
+def launch():
+    """Open a borderless window with a large font and run this script in it."""
+    palette = read_palette()
+    args = [
+        "alacritty",
+        "-o",
+        f"font.size={FONT_SIZE}",
+        "-o",
+        'font.bold.style="ExtraBold"',
+        "-o",
+        "window.padding.x=0",
+        "-o",
+        "window.padding.y=0",
+        "-o",
+        "window.dynamic_padding=false",
+        "-o",
+        'window.decorations="none"',
+        "-o",
+        "window.opacity=1.0",
+        "-o",
+        f'colors.primary.background="{palette["background"]}"',
+        "-o",
+        f'colors.primary.foreground="{palette["foreground"]}"',
+        "--class",
+        "music-tui,music-tui",
+        "-T",
+        "music-tui",
+        "-e",
+        "env",
+        f"{INNER}=1",
+        os.path.realpath(__file__),
+    ]
+
+    rule = "music-tui:music-tui:*"
+    try:
+        subprocess.run(["bspc", "rule", "-r", rule], capture_output=True, timeout=2)
+        monitor = json.loads(
+            subprocess.run(
+                ["bspc", "query", "-T", "-m"], capture_output=True, text=True, timeout=2
+            ).stdout
+        )
+        rect, padding = monitor["rectangle"], monitor["padding"]
+        x = rect["x"] + padding["left"]
+        y = rect["y"] + padding["top"]
+        w = rect["width"] - padding["left"] - padding["right"]
+        h = rect["height"] - padding["top"] - padding["bottom"]
+        win_w, win_h = int(w * 0.68), int(h * 0.26)
+        geometry = (
+            f"{win_w}x{win_h}+{x + (w - win_w) // 2}+{y + (h - win_h) // 2}"
+        )
+        subprocess.run(
+            [
+                "bspc",
+                "rule",
+                "-a",
+                rule,
+                "state=floating",
+                "border=off",
+                f"rectangle={geometry}",
+            ],
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
+        pass
+
+    # Detach, so the terminal that ran `music-tui` returns to its prompt at once.
+    subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+if __name__ == "__main__":
+    if os.environ.get(INNER):
+        run()
+    else:
+        launch()

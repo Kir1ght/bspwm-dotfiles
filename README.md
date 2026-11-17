@@ -134,22 +134,16 @@ Media keys work through `playerctl` with an `mpd` fallback.
 
 ### 🎵 Lyrics in the terminal
 
-`Super + M` opens `music-tui`: time-synchronized lyrics from
-[lrclib.net](https://lrclib.net) via `sptlrx`, with a `cava` visualizer
-underneath, in a floating borderless window with a larger font. The window is
-centered at 72% of the monitor and both halves share the wallpaper palette, so
-the active lyric line is the same accent blue as the focused window border.
+Type `music-tui` in any terminal. A borderless floating window opens with a
+large font and shows the words of the line being sung, one or two at a time:
+the current word in the accent colour, the next one dimmed. Nothing else is
+drawn — no track name, no hints.
 
-```bash
-music-tui            # lyrics + cava
-music-tui -n         # lyrics only
-music-tui -f 32      # bigger font
-music-tui -p chromium  # follow one MPRIS player
-```
-
-`sptlrx` follows any MPRIS source (browser, mpv, spotifyd, ncspot), so nothing
-needs to be logged in. Lyrics colours live in `config/sptlrx/config.yaml`;
-the cava gradient lives in the `[color]` section of `config/cava/config`.
+Lyrics come from [lrclib.net](https://lrclib.net) and the playback position from
+any MPRIS source through `playerctl` (browser, mpv, spotifyd, ncspot), so nothing
+needs to be logged in. Colours are read from the Alacritty theme, so the window
+matches the rest of the desktop. Font size and window size are constants at the
+top of `bin/music-tui`.
 
 ## 📸 Screenshots
 
@@ -199,7 +193,6 @@ before copying.
 | Shortcut | Action |
 |---|---|
 | `Super + T` / `W` / `E` | terminal, Firefox, Thunar |
-| `Super + M` | lyrics in the terminal (`music-tui`) |
 | `Super + Space` | rofi |
 | `Super + Q` | close the focused window |
 | `Super + 1…9` | switch desktop |
