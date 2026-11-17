@@ -134,16 +134,22 @@ Media keys work through `playerctl` with an `mpd` fallback.
 
 ### 🎵 Lyrics in the terminal
 
-Type `music-tui` in any terminal. A borderless floating window opens with a
-large font and shows the words of the line being sung, one or two at a time:
-the current word in the accent colour, the next one dimmed. Nothing else is
-drawn — no track name, no hints.
+Type `music-tui` in any terminal. A borderless floating window opens and shows
+the words being sung, one or two at a time, drawn as large block letters. Nothing
+else is drawn — no track name, no hints.
+
+The letters are the real ExtraBold font rendered to pixels and printed as
+half-blocks, so they stay smooth and always fit the window. Latin and Cyrillic
+use JetBrains Mono, Japanese lyrics use Noto Sans CJK. The window keeps the
+terminal's own colours and background, so it matches the rest of the desktop.
 
 Lyrics come from [lrclib.net](https://lrclib.net) and the playback position from
 any MPRIS source through `playerctl` (browser, mpv, spotifyd, ncspot), so nothing
-needs to be logged in. Colours are read from the Alacritty theme, so the window
-matches the rest of the desktop. Font size and window size are constants at the
-top of `bin/music-tui`.
+needs to be logged in. Font size and window size are constants at the top of
+`bin/music-tui`.
+
+Needs `playerctl`, `python-pillow`, `python-fonttools`, the JetBrains Mono fonts
+and `noto-fonts-cjk`.
 
 ## 📸 Screenshots
 

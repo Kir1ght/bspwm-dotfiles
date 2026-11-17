@@ -155,7 +155,7 @@ PACMAN_CORE=(
     # documents / music / media
     zathura zathura-pdf-mupdf zathura-djvu mpd mpc ncmpcpp cava ranger ueberzug
     # lyrics in the terminal (music-tui)
-    playerctl
+    playerctl python-fonttools
     # CLI / editors / utilities
     lsd bat micro neovim tree fastfetch btop htop git base-devel
     curl wget rsync pciutils python-pillow
