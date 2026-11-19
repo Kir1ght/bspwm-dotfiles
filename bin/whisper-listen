@@ -24,6 +24,17 @@ fi
 
 LECTURE_PROMPT="Конспект университетской лекции на русском языке. Грамотная академическая речь, точная терминология, развернутые предложения, правильная пунктуация."
 
+# Whisper sometimes writes a Latin look-alike inside a Cyrillic word
+# ("привeт"); fix such homoglyphs before saving/typing the transcript.
+HOMOGLYPHS="$HOME/.local/bin/fix-homoglyphs.py"
+normalize() {
+    if [ -f "$HOMOGLYPHS" ] && command -v python3 >/dev/null 2>&1; then
+        python3 "$HOMOGLYPHS"
+    else
+        cat
+    fi
+}
+
 if [ -f "$PID_FILE" ]; then
     REC_PID=$(cat "$PID_FILE")
     RAW_AUDIO=$(cat "$AUDIO_PATH_FILE" 2>/dev/null)
@@ -43,7 +54,7 @@ if [ -f "$PID_FILE" ]; then
     ffmpeg -y -i "$RAW_AUDIO" -af "highpass=f=80,lowpass=f=8000,dynaudnorm=p=0.9:s=5" -ar 16000 -ac 1 -c:a pcm_s16le "$CLEAN_WAV" -loglevel error
 
     # Fast CPU inference with Turbo model (bs 2 + all threads)
-    TEXT=$(nice -n -10 $WHISPER_BIN -m "$MODEL" -f "$CLEAN_WAV" -l ru -ng -bs 2 -bo 2 -t $(nproc) --prompt "$LECTURE_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g')
+    TEXT=$(nice -n -10 $WHISPER_BIN -m "$MODEL" -f "$CLEAN_WAV" -l ru -ng -bs 2 -bo 2 -t $(nproc) --prompt "$LECTURE_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g' | normalize)
 
     rm -f "$CLEAN_WAV"
 

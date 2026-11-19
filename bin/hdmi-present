@@ -1,0 +1,109 @@
+#!/bin/sh
+# Attach the discrete NVIDIA GPU's HDMI output to the X session (Reverse PRIME).
+#
+# On this laptop the internal panel is driven by the AMD iGPU, while the HDMI
+# port is wired to the discrete NVIDIA GPU. X runs on the AMD card, so the
+# NVIDIA outputs are invisible to xrandr until they are attached as a PRIME
+# display-offload sink:
+#
+#   xrandr --setprovideroutputsource <nvidia-provider> <amd-provider>
+#
+# Usage:
+#   hdmi-present setup          attach the NVIDIA outputs only (called from
+#                               bspwmrc, before dual_monitors.sh)
+#   hdmi-present on             attach them and enable the connected HDMI
+#   hdmi-present on --window    ... and move the focused window there
+#
+# The NVIDIA driver must be present in the X server for any of this to work.
+# If /etc/X11/xorg.conf.d/10-igpu.conf is still enabled, X loads only the AMD
+# driver, no NVIDIA provider exists and HDMI stays dark.
+
+set -u
+
+LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/hdmi-present.log"
+QUIET=0
+
+log() {
+    mkdir -p "${LOG_FILE%/*}" 2>/dev/null || true
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+notify() {
+    [ "$QUIET" = 1 ] && return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -a "HDMI" -i video-display "HDMI" "$1" >/dev/null 2>&1 || true
+}
+
+fail() {
+    log "error: $*"
+    notify "$*"
+    exit 1
+}
+
+ACTION="${1:-on}"
+MOVE_WINDOW=0
+[ "${2:-}" = "--window" ] && MOVE_WINDOW=1
+
+case "$ACTION" in
+    setup) QUIET=1 ;;
+    on) ;;
+    *)
+        echo "usage: hdmi-present [setup|on] [--window]" >&2
+        exit 2
+        ;;
+esac
+
+[ -n "${DISPLAY:-}" ] || fail "DISPLAY is not set"
+
+PROVIDERS=$(xrandr --listproviders 2>/dev/null) || fail "xrandr --listproviders failed"
+log "providers: $(printf '%s' "$PROVIDERS" | tr '\n' '|')"
+
+# Provider indices; the NVIDIA one is matched by name, the source (AMD) is the
+# first provider that is not NVIDIA.
+NV_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider [0-9]+:/ && /NVIDIA/ {gsub(":", "", $2); print $2; exit}')
+AMD_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider [0-9]+:/ && !/NVIDIA/ {gsub(":", "", $2); print $2; exit}')
+
+[ -n "$NV_PROVIDER" ] || fail "no NVIDIA provider in X: the Xorg config still disables the dGPU"
+[ -n "$AMD_PROVIDER" ] || fail "no source provider in X"
+
+log "setting provider output source: $NV_PROVIDER <- $AMD_PROVIDER"
+if ! xrandr --setprovideroutputsource "$NV_PROVIDER" "$AMD_PROVIDER" >>"$LOG_FILE" 2>&1; then
+    fail "xrandr --setprovideroutputsource failed (see $LOG_FILE)"
+fi
+
+[ "$ACTION" = "setup" ] && exit 0
+
+CONNECTED=$(xrandr -q | awk '/ connected/ {print $1}')
+INTERNAL=$(printf '%s\n' "$CONNECTED" | grep -E '^(eDP|LVDS)' | head -n1)
+[ -n "$INTERNAL" ] || INTERNAL=$(printf '%s\n' "$CONNECTED" | head -n1)
+
+# Prefer the NVIDIA connector names (HDMI-*, DFP-*, DP-*-*), then fall back to
+# any connected output that is not the internal panel.
+EXTERNAL=$(printf '%s\n' "$CONNECTED" | grep -vE '^(eDP|LVDS)' | grep -E '^(HDMI|DFP|DP-[0-9]+-[0-9]+)' | head -n1)
+[ -n "$EXTERNAL" ] || EXTERNAL=$(printf '%s\n' "$CONNECTED" | grep -vE '^(eDP|LVDS)' | head -n1)
+
+[ -n "$EXTERNAL" ] || fail "no external output: is the HDMI cable plugged in?"
+[ -n "$INTERNAL" ] || fail "no internal panel found"
+
+log "enabling $EXTERNAL next to $INTERNAL"
+xrandr --output "$EXTERNAL" --auto --left-of "$INTERNAL" >>"$LOG_FILE" 2>&1 ||
+    fail "could not enable $EXTERNAL (see $LOG_FILE)"
+
+if [ "$MOVE_WINDOW" = 1 ]; then
+    # bspwm learns about the new monitor through RandR, so give it a moment.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        bspc query -M --names 2>/dev/null | grep -qx "$EXTERNAL" && break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if bspc query -M --names 2>/dev/null | grep -qx "$EXTERNAL"; then
+        bspc node -m "$EXTERNAL" -t fullscreen >>"$LOG_FILE" 2>&1 ||
+            log "could not move the focused window to $EXTERNAL"
+    else
+        log "bspwm does not know the monitor $EXTERNAL yet"
+    fi
+fi
+
+log "done: $EXTERNAL"
+notify "projector enabled: $EXTERNAL"

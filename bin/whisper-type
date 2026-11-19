@@ -24,6 +24,17 @@ fi
 # Промпт, который помогает мелкой модели не путать сленг и контекст чата
 CHAT_PROMPT="Разговорный чат, живая речь, сленг, дискорд, телеграм, че как, го, ща, лол, имба, хз, всм, пж, кст, типа, короче."
 
+# Whisper sometimes writes a Latin look-alike inside a Cyrillic word
+# ("привeт"); fix such homoglyphs before typing.
+HOMOGLYPHS="$HOME/.local/bin/fix-homoglyphs.py"
+normalize() {
+    if [ -f "$HOMOGLYPHS" ] && command -v python3 >/dev/null 2>&1; then
+        python3 "$HOMOGLYPHS"
+    else
+        cat
+    fi
+}
+
 if [ -f "$PID_FILE" ]; then
     REC_PID=$(cat "$PID_FILE")
     kill "$REC_PID" 2>/dev/null
@@ -42,7 +53,7 @@ if [ -f "$PID_FILE" ]; then
         -bs 1 -bo 1 \
         -t $(nproc) \
         --no-timestamps \
-        --prompt "$CHAT_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g')
+        --prompt "$CHAT_PROMPT" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ' ' | sed 's/  */ /g' | normalize)
 
     if [ -n "$TEXT" ]; then
         xdotool type --clearmodifiers "$TEXT "

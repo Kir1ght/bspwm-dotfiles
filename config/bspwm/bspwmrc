@@ -11,7 +11,15 @@ if ! pgrep -x sxhkd > /dev/null; then
     sxhkd &
 fi
 
+# A previous session may have left the panel DPMS-off; light it up again so a
+# fresh X session never starts on a black screen.
+command -v screen-wake >/dev/null 2>&1 && screen-wake >/dev/null 2>&1
+
 # Multiple monitor support
+# The HDMI port is wired to the NVIDIA GPU: attach its outputs as a PRIME
+# display-offload sink first, otherwise xrandr (and dual_monitors.sh) cannot
+# see them at all. Silent no-op while the dGPU is disabled in Xorg.
+command -v hdmi-present >/dev/null 2>&1 && hdmi-present setup >/dev/null 2>&1
 sh $HOME/.config/bspwm/dual_monitors.sh
 
 # Palette generated from the current wallpaper (falls back to Dracula)

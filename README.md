@@ -126,11 +126,29 @@ services if the system has a GPU. At idle, `runtime_status` should be
 prime-run <command>
 ```
 
+### 📽️ Projector / HDMI
+
+The HDMI port is wired to the discrete NVIDIA GPU, while the internal panel
+and the X session run on the AMD iGPU. X cannot see the port until the NVIDIA
+outputs are attached as a PRIME display-offload sink.
+
+Plug the cable, focus the slideshow and press `Super + Shift + O`
+(`hdmi-present on --window`): the HDMI output is enabled, placed next to the
+internal panel, and the focused window goes there fullscreen. The same script
+runs in `setup` mode at login, so a projector connected before `startx` is
+picked up by `dual_monitors.sh`.
+
+Loading the NVIDIA driver into X costs about 2 W at idle: the dGPU can no
+longer runtime-suspend. `hdmi-gpu on|off` (needs sudo and a relogin) switches
+between "HDMI works" and "best battery".
+
 ### 🎙️ Whisper and media
 
 `Super + D` — voice typing, `Super + Shift + D` — lecture recording. Whisper
 models are not stored in git; `./install.sh --with-whisper` downloads them.
-Media keys work through `playerctl` with an `mpd` fallback.
+Media keys work through `playerctl` with an `mpd` fallback. Latin look-alikes
+that Whisper drops inside Cyrillic words (`привeт`) are replaced with the
+Cyrillic letter before typing.
 
 ### 🎵 Lyrics in the terminal
 
@@ -219,8 +237,10 @@ before copying.
 | `Print` | area screenshot |
 | `Ctrl + Shift + L` | lock the screen |
 | `Super + S` | turn off the display after 2 seconds |
+| `Super + Alt + S` | wake the panel if it stayed dark |
 | `Super + D` / `Super + Shift + D` | Whisper: typing, lecture recording |
 | `Super + Shift + U` | touchpad: toggle auto-disable while a mouse is connected |
+| `Super + Shift + O` | projector: enable HDMI (NVIDIA) and fullscreen the focused window |
 
 Media keys and Fn brightness keys are also bound in sxhkd.
 
@@ -504,6 +524,15 @@ chmod 755 ~/.config/bspwm/bspwmrc
 Then log out and back in. Copying configs with `install -m644`, restoring from
 a backup, or a `git archive` extraction can all drop the bit. `install.sh`
 sets it and aborts if it is missing.
+
+### Black screen after login
+
+The previous session can leave the panel DPMS-off; the text console then
+stays black although the machine works, and a reboot may not fix it (the
+requested brightness is unchanged, so the driver never re-applies it).
+`screen-wake` writes a readable value and clears DPMS. It runs from
+`~/.bash_profile` at a text login, from `bspwmrc` when X starts and from
+`~/.xinitrc` after bspwm exits; `Super + Alt + S` calls it by hand.
 
 ## 📝 Notes
 

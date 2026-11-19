@@ -22,6 +22,10 @@ ctrl + shift + l
 super + s
     sleep 2 && xset dpms force off
 
+# Wake the panel if it stayed dark (DPMS left it off after logout or reboot)
+super + alt + s
+    ~/.local/bin/screen-wake
+
 # Quit / restart bspwm
 ctrl + shift + {q,r}
     bspc {quit,wm -r}
@@ -265,3 +269,8 @@ super + shift + {button4,button5}
 # Toggle: touchpad off while a mouse is connected <-> touchpad always on
 super + shift + u
     ~/.local/bin/touchpad-autoswitch toggle
+
+# Projector: enable the HDMI output (wired to the NVIDIA GPU) and move the
+# focused window there fullscreen — plug the cable, focus the slideshow, press.
+super + shift + o
+    ~/.local/bin/hdmi-present on --window

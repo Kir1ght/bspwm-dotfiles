@@ -1,0 +1,31 @@
+#!/bin/sh
+# Bring the panel back when X or DPMS left it dark.
+#
+# If an X session ends while the display is off (Super+S, DPMS idle, a killed
+# session), the framebuffer console often stays black: the requested sysfs
+# brightness is unchanged, so the driver never re-applies it to the hardware.
+# Writing a different value forces the panel to light up again.
+#
+# Safe to call at any time: it only touches the backlight when the panel is
+# actually dark (actual_brightness near zero) and only clears DPMS from a
+# running X session.
+
+CARD=$(ls /sys/class/backlight 2>/dev/null | head -n1)
+[ -n "$CARD" ] || exit 0
+DIR=/sys/class/backlight/$CARD
+
+# Value systemd-backlight restored at boot; fall back to ~30%.
+SAVED=19660
+for f in /var/lib/systemd/backlight/*:backlight:"$CARD"; do
+    [ -f "$f" ] && SAVED=$(cat "$f" 2>/dev/null || echo 19660)
+done
+[ "$SAVED" -ge 12000 ] 2>/dev/null || SAVED=19660
+
+ACTUAL=$(cat "$DIR/actual_brightness" 2>/dev/null || echo 0)
+if [ "$ACTUAL" -lt 3000 ] 2>/dev/null; then
+    printf '%s\n' "$SAVED" >"$DIR/brightness" 2>/dev/null || true
+fi
+
+if [ -n "${DISPLAY:-}" ] && command -v xset >/dev/null 2>&1; then
+    xset dpms force on >/dev/null 2>&1 || true
+fi

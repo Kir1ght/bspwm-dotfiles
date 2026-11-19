@@ -5,4 +5,8 @@ export PATH="$HOME/.local/bin:$PATH"
 setxkbmap -layout us,ru -option grp:alt_shift_toggle
 
 sxhkd &
-exec bspwm
+
+# No exec: once bspwm exits, X tears the session down while the panel may
+# still be DPMS-off, and the text console would stay black.
+bspwm
+"$HOME/.local/bin/screen-wake"

@@ -1,0 +1,73 @@
+#!/bin/sh
+# Switch the discrete NVIDIA GPU between "usable by X" and "off".
+#
+# The HDMI port is wired to the NVIDIA GPU, so the X server must load the
+# NVIDIA driver for an external monitor to work at all (Reverse PRIME). The
+# price: while X holds the dGPU it cannot runtime-suspend, which costs battery
+# — that is what /etc/X11/xorg.conf.d/10-igpu.conf avoided.
+#
+#   hdmi-gpu on       let X load the NVIDIA driver (HDMI works)
+#   hdmi-gpu off      X uses only the AMD iGPU (best battery)
+#   hdmi-gpu status   show the current state
+#
+# The change takes effect at the next X start: log out of bspwm (Ctrl+Shift+Q)
+# and run startx again.
+
+CONF=/etc/X11/xorg.conf.d/10-igpu.conf
+DISABLED=$CONF.disabled
+
+state() {
+    if [ -e "$CONF" ]; then
+        echo off
+    elif [ -e "$DISABLED" ]; then
+        echo on
+    else
+        echo unknown
+    fi
+}
+
+case "${1:-status}" in
+    status)
+        case "$(state)" in
+            on)
+                echo "on  - X loads the NVIDIA driver, the HDMI port works"
+                echo "      the dGPU may stay awake, so battery life is lower"
+                ;;
+            off)
+                echo "off - X uses only the AMD iGPU, the HDMI port is dead"
+                ;;
+            *)
+                echo "unknown - neither $CONF nor $DISABLED exists"
+                exit 1
+                ;;
+        esac
+        ;;
+    on)
+        if [ -e "$DISABLED" ]; then
+            echo "already on"
+            exit 0
+        fi
+        if [ ! -e "$CONF" ]; then
+            echo "unknown state: $CONF is missing" >&2
+            exit 1
+        fi
+        sudo mv "$CONF" "$DISABLED" || exit 1
+        echo "NVIDIA GPU enabled for X. Log out and run startx to apply."
+        ;;
+    off)
+        if [ -e "$CONF" ]; then
+            echo "already off"
+            exit 0
+        fi
+        if [ ! -e "$DISABLED" ]; then
+            echo "unknown state: $DISABLED is missing" >&2
+            exit 1
+        fi
+        sudo mv "$DISABLED" "$CONF" || exit 1
+        echo "NVIDIA GPU disabled for X. Log out and run startx to apply."
+        ;;
+    *)
+        echo "usage: hdmi-gpu on|off|status" >&2
+        exit 2
+        ;;
+esac

@@ -7,7 +7,7 @@ flock -n 9 || exit 0
 choice=$(printf "Lock\nLogout\nSuspend\nReboot\nShutdown" | rofi -m -1 -dmenu)
 case "$choice" in
   Lock) sh $HOME/bin/screen-lock ;;
-  Logout) pkill -KILL -u "$USER" ;;
+  Logout) sh $HOME/.local/bin/screen-wake; pkill -KILL -u "$USER" ;;
   Suspend) systemctl suspend && sh $HOME/bin/screen-lock ;;
   Reboot) systemctl reboot ;;
   Shutdown) systemctl poweroff ;;
