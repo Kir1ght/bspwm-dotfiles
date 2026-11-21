@@ -1,0 +1,3 @@
+# VXE R1 SE+ (Compx Nearlink dongle 373b:10c9): allow the logged-in user to
+# read the mouse battery over hidraw (see bin/vxe-battery).
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c9", TAG+="uaccess"

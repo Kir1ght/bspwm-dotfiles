@@ -422,6 +422,14 @@ while the kernel still lists them; the kernel check keeps the pad off during
 that window. Absence is debounced (three polls, about six seconds), so a
 brief dongle dropout does not switch the pad back on.
 
+### Mouse battery
+
+`vxe-battery` asks the VXE R1 SE+ dongle for the charge over hidraw and
+prints `87% (charging)`. `--percent` prints just the number for scripts,
+`--json` the full reply. It needs `system/udev/71-vxe-mouse.rules` installed
+(`install.sh` does that) so the logged-in user may open the dongle's HID
+interface.
+
 ### 🖐️ Gestures
 
 Gestures work through `touchegg` (X11 only). The installer enables the

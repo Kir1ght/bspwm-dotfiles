@@ -407,6 +407,16 @@ install_configs() {
     fi
     mkdir -p "$HOME/Pictures/kiri-vault"
 
+    # udev rules that live outside ~/.config (mouse battery over hidraw).
+    if compgen -G "$REPO_DIR/system/udev/*.rules" >/dev/null 2>&1; then
+        log "Installing udev rules..."
+        for rule in "$REPO_DIR"/system/udev/*.rules; do
+            sudo install -Dm644 "$rule" "/etc/udev/rules.d/$(basename "$rule")"
+        done
+        sudo udevadm control --reload-rules || true
+        sudo udevadm trigger --subsystem-match=hidraw || true
+    fi
+
     # Make the art browser available from the rofi application launcher too.
     install -Dm644 "$CONFIG_SRC/anime-wall/anime-wall.desktop" \
         "$HOME/.local/share/applications/anime-wall.desktop"

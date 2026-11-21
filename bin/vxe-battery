@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Read the battery of a VXE R1 SE+ mouse through its 2.4 GHz dongle.
+
+The receiver (Compx "Nearlink" dongle, 373b:10c9) exposes a vendor HID
+collection: usage page 0xFF02, report ID 0x08, 17-byte input and output
+reports. There is no feature report, so the exchange is an output report
+followed by an input report.
+
+Request:  08 04 00 .. 00 49        (checksum = 0x4D - cmd)
+Reply:    08 04 .. percent charging voltage_hi voltage_lo ..
+
+percent is byte 6, charging byte 7, millivolts bytes 8-9 (big endian).
+Models that answer a different battery command use 0x17: percent = byte5*2.
+Protocol notes: github.com/ivancacic/vxe-battery-tray (PROTOCOL.md).
+
+Usage:
+    vxe-battery            "87% (charging)"
+    vxe-battery --percent  87
+    vxe-battery --json     {"percent":87,"charging":true,"millivolts":4100}
+    vxe-battery --udev     print the udev rule that grants access to hidraw
+"""
+
+import glob
+import json
+import os
+import select
+import sys
+import time
+
+VENDOR = "373b"
+PRODUCT = "10c9"
+REPORT_ID = 0x08
+REPORT_LEN = 17
+
+UDEV_RULE = (
+    '# VXE R1 SE+ (Compx Nearlink dongle 373b:10c9): let the logged-in user\n'
+    '# read the battery over hidraw.\n'
+    'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c9", '
+    'TAG+="uaccess"\n'
+)
+
+
+def candidates():
+    """hidraw nodes belonging to the mouse dongle."""
+    hid_id = f":0000{VENDOR.upper()}:0000{PRODUCT.upper()}"
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(os.path.join(path, "device", "uevent")) as fh:
+                uevent = fh.read()
+        except OSError:
+            continue
+        if hid_id in uevent:
+            yield "/dev/" + os.path.basename(path)
+
+
+def query(dev, cmd, timeout=0.8):
+    request = bytes([REPORT_ID, cmd] + [0] * 14 + [(0x4D - cmd) & 0xFF])
+    try:
+        fd = os.open(dev, os.O_RDWR)
+    except PermissionError:
+        raise
+    except OSError:
+        return None
+    try:
+        if os.write(fd, request) != len(request):
+            return None
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return None
+        reply = os.read(fd, REPORT_LEN)
+    finally:
+        os.close(fd)
+    if len(reply) < REPORT_LEN or reply[0] != REPORT_ID or reply[1] != cmd:
+        return None
+    return reply
+
+
+def parse(reply, cmd):
+    if cmd == 0x04:
+        percent = reply[6]
+        charging = reply[7] == 1
+        millivolts = (reply[8] << 8) | reply[9]
+        if 0 <= percent <= 100 and (millivolts == 0 or 2500 <= millivolts <= 5000):
+            return percent, charging, millivolts
+        return None
+    percent = min(reply[5] * 2, 100)
+    if 0 < percent <= 100:
+        return percent, None, None
+    return None
+
+
+def read_battery():
+    denied = []
+    for dev in candidates():
+        for cmd in (0x04, 0x17):
+            # A sleeping mouse often ignores the first report; the next one
+            # wakes it, so give every command a couple of attempts.
+            for attempt in range(3):
+                try:
+                    reply = query(dev, cmd)
+                except PermissionError:
+                    denied.append(dev)
+                    break
+                if reply is None:
+                    time.sleep(0.15)
+                    continue
+                parsed = parse(reply, cmd)
+                if parsed:
+                    return parsed[0], parsed[1], parsed[2], dev
+                break
+    if denied:
+        raise PermissionError(", ".join(sorted(set(denied))))
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+    if "--udev" in args:
+        print(UDEV_RULE, end="")
+        return 0
+    try:
+        result = read_battery()
+    except PermissionError as exc:
+        print(
+            f"no access to {exc}: install the udev rule (`vxe-battery --udev`)\n"
+            "or run once as root",
+            file=sys.stderr,
+        )
+        return 2
+    if result is None:
+        print("no reply: the mouse may be asleep (move it and try again)", file=sys.stderr)
+        return 1
+
+    percent, charging, millivolts, dev = result
+    if "--json" in args:
+        print(json.dumps({"percent": percent, "charging": charging,
+                          "millivolts": millivolts, "device": dev}))
+    elif "--percent" in args:
+        print(percent)
+    elif "--verbose" in args:
+        extra = []
+        if charging is not None:
+            extra.append("charging" if charging else "on battery")
+        if millivolts:
+            extra.append(f"{millivolts / 1000:.2f} V")
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        print(f"{percent}%{suffix} [{dev}]")
+    else:
+        extra = []
+        if charging:
+            extra.append("charging")
+        if millivolts:
+            extra.append(f"{millivolts / 1000:.2f} V")
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        print(f"{percent}%{suffix}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
