@@ -118,6 +118,11 @@ codec (SBC, SBC-XQ, AAC, LDAC, aptX, aptX HD — whatever PipeWire offers for
 the connected device), make it the default audio output, or forget it. The
 main menu also rescans for devices and switches the adapter on or off.
 
+LDAC is capped at 660 kbps (`sq`) in
+`config/wireplumber/wireplumber.conf.d/51-bluetooth.conf`: the MediaTek
+MT7922 combo card stutters at the default 990 kbps while Wi-Fi is active.
+Lower it to `mq` (330 kbps) or remove the file to taste.
+
 ### 📊 Polybar
 
 bspwm desktops, CPU, memory, temperature, GPU, now-playing, weather, battery,

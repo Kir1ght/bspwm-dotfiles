@@ -37,22 +37,51 @@ trim() {
     printf '%s' "$s"
 }
 
+# Codec token -> short human name (SBC, LDAC, aptX HD, ...).
+codec_name_label() {
+    case "${1,,}" in
+        sbc) echo "SBC" ;;
+        sbc_xq | sbc-xq) echo "SBC-XQ" ;;
+        aac) echo "AAC" ;;
+        ldac) echo "LDAC" ;;
+        aptx) echo "aptX" ;;
+        aptx_hd | aptx-hd) echo "aptX HD" ;;
+        aptx_ll) echo "aptX LL" ;;
+        faststream) echo "FastStream" ;;
+        opus) echo "Opus" ;;
+        msbc) echo "mSBC" ;;
+        cvsd) echo "CVSD" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # Profile id -> short human name.
 codec_label() {
     case "$1" in
-        a2dp-sink-sbc) echo "SBC" ;;
-        a2dp-sink-sbc_xq) echo "SBC-XQ" ;;
-        a2dp-sink-aac) echo "AAC" ;;
-        a2dp-sink-ldac) echo "LDAC" ;;
-        a2dp-sink-aptx) echo "aptX" ;;
-        a2dp-sink-aptx_hd) echo "aptX HD" ;;
-        a2dp-sink-aptx_ll) echo "aptX LL" ;;
-        a2dp-sink-faststream) echo "FastStream" ;;
-        a2dp-sink-opus) echo "Opus" ;;
-        headset-head-unit) echo "Headset (HFP)" ;;
-        headset-head-unit-cvsd) echo "Headset (HFP, CVSD)" ;;
+        a2dp-sink) echo "A2DP" ;;
+        a2dp-sink-*) codec_name_label "${1#a2dp-sink-}" ;;
+        headset-head-unit) echo "Headset (HFP, mSBC)" ;;
         headset-head-unit-msbc) echo "Headset (HFP, mSBC)" ;;
-        *) echo "$1" ;;
+        headset-head-unit-cvsd) echo "Headset (HFP, CVSD)" ;;
+        *) codec_name_label "$1" ;;
+    esac
+}
+
+# PipeWire names the default A2DP profile just "a2dp-sink"; its description
+# carries the codec it will use ("... codec LDAC", "кодек LDAC", ...).
+codec_label_from_desc() {
+    local id=$1 desc=$2
+    case "$id" in
+        headset-head-unit*) codec_label "$id" ;;
+        a2dp-sink)
+            if [[ "$desc" =~ [Cc]odec[[:space:]]+([A-Za-z0-9_-]+) ]] ||
+                [[ "$desc" =~ кодек[[:space:]]+([A-Za-z0-9_-]+) ]]; then
+                codec_name_label "${BASH_REMATCH[1]}"
+            else
+                codec_label "$id"
+            fi
+            ;;
+        *) codec_label "$id" ;;
     esac
 }
 
@@ -86,12 +115,21 @@ card_name_for() {
 }
 
 active_codec_label() {
-    local mac=$1 card block profile
-    card=$(card_name_for "$mac")
-    block=$(card_block "$card")
-    [ -n "$block" ] || return 0
-    profile=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
-    [ -n "$profile" ] && codec_label "$profile"
+    local mac=$1 codec
+    codec=$(pw-dump 2>/dev/null | MAC="$mac" python3 -c '
+import json, os, sys
+mac = os.environ["MAC"]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit()
+for obj in data:
+    props = (obj.get("info") or {}).get("props") or {}
+    if props.get("api.bluez5.address") == mac and props.get("api.bluez5.codec"):
+        print(props["api.bluez5.codec"])
+        break
+' 2>/dev/null)
+    [ -n "$codec" ] && codec_name_label "$codec"
 }
 
 scan_devices() {
@@ -224,7 +262,7 @@ use_audio_sink() {
 }
 
 codec_menu() {
-    local mac=$1 name=$2 card block active line id label choice wanted i
+    local mac=$1 name=$2 card block active line id label desc choice wanted i
     card=$(card_name_for "$mac")
     block=$(card_block "$card")
     if [ -z "$block" ]; then
@@ -233,16 +271,31 @@ codec_menu() {
     fi
     active=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
 
-    local -a opts=() ids=()
+    # WirePlumber sometimes brings the card up in HFP-only mode before the
+    # A2DP endpoints are ready ("Could not find valid non-headset profile"),
+    # which leaves just the two headset entries in the menu. One reconnect
+    # brings the full profile list back.
+    if ! printf '%s\n' "$block" | profile_lines | grep -q 'a2dp-sink'; then
+        bluetoothctl disconnect "$mac" >/dev/null 2>&1
+        sleep 1
+        timeout 20 bluetoothctl connect "$mac" >/dev/null 2>&1
+        sleep 2
+        block=$(card_block "$card")
+        active=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
+    fi
+
+    local -a opts=() ids=() labels=()
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         line=$(trim "$line")
         id=${line%%:*}
+        desc=$(trim "${line#*:}")
         case "$id" in
             a2dp-sink* | headset-head-unit*) ;;
             *) continue ;;
         esac
-        label=$(codec_label "$id")
+        label=$(codec_label_from_desc "$id" "$desc")
+        labels+=("$label")
         [ "$id" = "$active" ] && label="✓ $label"
         opts+=("$label")
         ids+=("$id")
@@ -260,7 +313,7 @@ codec_menu() {
     esac
     wanted=${choice#✓ }
     for i in "${!ids[@]}"; do
-        if [ "$(codec_label "${ids[$i]}")" = "$wanted" ]; then
+        if [ "${labels[$i]}" = "$wanted" ]; then
             if pactl set-card-profile "$card" "${ids[$i]}" >/dev/null 2>&1; then
                 sleep 1
                 notify "Codec: $wanted"
