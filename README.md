@@ -127,7 +127,8 @@ Wi-Fi power save and USB autosuspend disabled. AAC is a clean alternative if
 ### 📊 Polybar
 
 bspwm desktops, CPU, memory, temperature, GPU, now-playing, weather, battery,
-volume, network, keyboard layout, and clock. `polybar-gpu` does not query
+volume, network, keyboard layout, device batteries (wireless mouse and
+Bluetooth headset, in one compact label), and clock. `polybar-gpu` does not query
 `nvidia-smi` while the GPU is asleep; otherwise it would wake up every few
 seconds.
 

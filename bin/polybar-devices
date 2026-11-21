@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# One compact polybar label with the batteries of the wireless mouse and the
+# connected Bluetooth audio device. A part disappears when it is unavailable
+# (mouse asleep / no Bluetooth device connected).
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/polybar-devices.lock"
+flock -n 9 || exit 0
+
+MOUSE_ICON=""
+BT_ICON=""
+
+parts=()
+
+pct=$(timeout 2 vxe-battery --percent 2>/dev/null)
+[[ "$pct" =~ ^[0-9]+$ ]] && parts+=("$MOUSE_ICON ${pct}%")
+
+bt=""
+while read -r mac; do
+    [ -n "$mac" ] || continue
+    info=$(timeout 2 bluetoothctl info "$mac" 2>/dev/null) || continue
+    batt=$(sed -n 's/^[[:space:]]*Battery Percentage:.*(\([0-9][0-9]*\)).*/\1/p' <<<"$info" | head -n1)
+    [ -n "$batt" ] || continue
+    icon=$(sed -n 's/^[[:space:]]*Icon: //p' <<<"$info" | head -n1)
+    if [[ "$icon" == audio-* ]]; then
+        bt=$batt
+        break
+    fi
+    [ -z "$bt" ] && bt=$batt
+done < <(timeout 3 bluetoothctl devices Connected 2>/dev/null | awk '{print $2}')
+
+[ -n "$bt" ] && parts+=("$BT_ICON ${bt}%")
+
+[ ${#parts[@]} -eq 0 ] && exit 0
+printf '%s\n' "${parts[*]}"
