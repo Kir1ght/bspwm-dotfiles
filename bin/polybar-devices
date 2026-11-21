@@ -1,34 +1,100 @@
 #!/usr/bin/env bash
 # One compact polybar label with the batteries of the wireless mouse and the
-# connected Bluetooth audio device. A part disappears when it is unavailable
-# (mouse asleep / no Bluetooth device connected).
+# connected Bluetooth audio device, plus low-battery notifications for the
+# mouse. Runs as a `tail = true` script: it prints a line only when the label
+# changes.
+#
+# Cadences are deliberately different: Bluetooth is cheap to poll (D-Bus, no
+# radio traffic) and is checked every 5 s, so disconnecting the headset updates
+# the label immediately. The mouse is asked over its 2.4 GHz dongle, which
+# wakes the radio, so a known value is refreshed only every 5 min; while the
+# mouse has not answered yet it retries every 30 s.
 
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/polybar-devices.lock"
 flock -n 9 || exit 0
 
-MOUSE_ICON=""
-BT_ICON=""
+MOUSE_ICON=$(printf '\xee\xbe\xba')
+BT_ICON=$(printf '\xef\x80\xa5')
 
-parts=()
+STATE="${XDG_CACHE_HOME:-$HOME/.cache}/vxe-battery.state"
+MOUSE_PERIOD=300
+MOUSE_RETRY=30
+BT_PERIOD=5
 
-pct=$(timeout 2 vxe-battery --percent 2>/dev/null)
-[[ "$pct" =~ ^[0-9]+$ ]] && parts+=("$MOUSE_ICON ${pct}%")
+mkdir -p "${STATE%/*}" 2>/dev/null || true
 
-bt=""
-while read -r mac; do
-    [ -n "$mac" ] || continue
-    info=$(timeout 2 bluetoothctl info "$mac" 2>/dev/null) || continue
-    batt=$(sed -n 's/^[[:space:]]*Battery Percentage:.*(\([0-9][0-9]*\)).*/\1/p' <<<"$info" | head -n1)
-    [ -n "$batt" ] || continue
-    icon=$(sed -n 's/^[[:space:]]*Icon: //p' <<<"$info" | head -n1)
-    if [[ "$icon" == audio-* ]]; then
-        bt=$batt
-        break
+mouse_pct=""
+mouse_next=0
+last=""
+
+bt_battery() {
+    local mac info batt icon fallback=""
+    while read -r mac; do
+        [ -n "$mac" ] || continue
+        info=$(timeout 2 bluetoothctl info "$mac" 2>/dev/null) || continue
+        batt=$(sed -n 's/^[[:space:]]*Battery Percentage:.*(\([0-9][0-9]*\)).*/\1/p' <<<"$info" | head -n1)
+        [ -n "$batt" ] || continue
+        icon=$(sed -n 's/^[[:space:]]*Icon: //p' <<<"$info" | head -n1)
+        if [[ "$icon" == audio-* ]]; then
+            printf '%s' "$batt"
+            return
+        fi
+        [ -z "$fallback" ] && fallback=$batt
+    done < <(timeout 3 bluetoothctl devices Connected 2>/dev/null | awk '{print $2}')
+    printf '%s' "$fallback"
+}
+
+refresh_mouse() {
+    local now json pct charging notified
+    now=$(date +%s)
+
+    if ! lsusb -d 373b:10c9 >/dev/null 2>&1; then
+        mouse_pct=""
+        mouse_next=$((now + MOUSE_PERIOD))
+        return
     fi
-    [ -z "$bt" ] && bt=$batt
-done < <(timeout 3 bluetoothctl devices Connected 2>/dev/null | awk '{print $2}')
 
-[ -n "$bt" ] && parts+=("$BT_ICON ${bt}%")
+    json=$(timeout 4 vxe-battery --json 2>/dev/null)
+    pct=$(sed -n 's/.*"percent": \([0-9][0-9]*\).*/\1/p' <<<"$json" | head -n1)
+    if [ -z "$pct" ]; then
+        # Asleep or busy: keep the last known value and retry sooner.
+        mouse_next=$((now + MOUSE_RETRY))
+        return
+    fi
 
-[ ${#parts[@]} -eq 0 ] && exit 0
-printf '%s\n' "${parts[*]}"
+    mouse_pct=$pct
+    mouse_next=$((now + MOUSE_PERIOD))
+    charging=0
+    grep -q '"charging": true' <<<"$json" && charging=1
+
+    notified=$(cat "$STATE" 2>/dev/null)
+    if [ "$charging" = 1 ] || [ "$pct" -gt 25 ]; then
+        printf '' >"$STATE"
+    elif [ "$pct" -le 10 ] && [ "$notified" != 10 ]; then
+        notify-send -u critical -a Mouse -i input-mouse \
+            "Mouse battery: ${pct}%" "Charge the VXE R1 SE+ now."
+        printf '10' >"$STATE"
+    elif [ "$pct" -le 20 ] && [ "$notified" != 20 ] && [ "$notified" != 10 ]; then
+        notify-send -a Mouse -i input-mouse \
+            "Mouse battery: ${pct}%" "About 20% left, time to charge."
+        printf '20' >"$STATE"
+    fi
+}
+
+while :; do
+    now=$(date +%s)
+    [ "$now" -ge "$mouse_next" ] && refresh_mouse
+
+    bt=$(bt_battery)
+    parts=()
+    [ -n "$mouse_pct" ] && parts+=("$MOUSE_ICON ${mouse_pct}%")
+    [ -n "$bt" ] && parts+=("$BT_ICON ${bt}%")
+    label="${parts[*]}"
+
+    if [ "$label" != "$last" ]; then
+        printf '%s\n' "$label"
+        last=$label
+    fi
+
+    sleep "$BT_PERIOD"
+done

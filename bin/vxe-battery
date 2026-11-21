@@ -40,20 +40,40 @@ UDEV_RULE = (
 )
 
 
+def is_battery_iface(name):
+    """True if this hidraw node exposes the 0xFF02 / report 8 / 16-byte pair."""
+    try:
+        with open(f"/sys/class/hidraw/{name}/device/report_descriptor", "rb") as fh:
+            desc = fh.read()
+    except OSError:
+        return False
+    return b"\x06\x02\xff" in desc and b"\x85\x08" in desc
+
+
 def candidates():
-    """hidraw nodes belonging to the mouse dongle."""
+    """hidraw nodes belonging to the mouse dongle.
+
+    The dongle exposes three HID interfaces; only one carries the vendor
+    battery collection. Picking it from the report descriptor avoids waiting
+    for timeouts on the other two.
+    """
     hid_id = f":0000{VENDOR.upper()}:0000{PRODUCT.upper()}"
+    found = []
     for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        name = os.path.basename(path)
         try:
             with open(os.path.join(path, "device", "uevent")) as fh:
                 uevent = fh.read()
         except OSError:
             continue
         if hid_id in uevent:
-            yield "/dev/" + os.path.basename(path)
+            found.append(name)
+    preferred = [name for name in found if is_battery_iface(name)]
+    for name in preferred or found:
+        yield "/dev/" + name
 
 
-def query(dev, cmd, timeout=0.8):
+def query(dev, cmd, timeout=1.0):
     request = bytes([REPORT_ID, cmd] + [0] * 14 + [(0x4D - cmd) & 0xFF])
     try:
         fd = os.open(dev, os.O_RDWR)
@@ -92,17 +112,18 @@ def parse(reply, cmd):
 def read_battery():
     denied = []
     for dev in candidates():
-        for cmd in (0x04, 0x17):
-            # A sleeping mouse often ignores the first report; the next one
-            # wakes it, so give every command a couple of attempts.
-            for attempt in range(3):
+        for cmd, attempts in ((0x04, 2), (0x17, 1)):
+            # A sleeping mouse often ignores the first report; a second one
+            # wakes it. Keep the whole exchange short so a silent mouse cannot
+            # stall a polybar poll.
+            for attempt in range(attempts):
                 try:
                     reply = query(dev, cmd)
                 except PermissionError:
                     denied.append(dev)
                     break
                 if reply is None:
-                    time.sleep(0.15)
+                    time.sleep(0.1)
                     continue
                 parsed = parse(reply, cmd)
                 if parsed:
