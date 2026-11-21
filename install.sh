@@ -194,7 +194,7 @@ MULTILIB_PKGS=(
 )
 
 AUR_CORE=(
-    greenclip light rofi-bluetooth-git throne-bin ttf-symbola ttf-ms-fonts
+    greenclip light throne-bin ttf-symbola ttf-ms-fonts
     v2raya-bin upscayl-bin
 )
 

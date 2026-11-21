@@ -130,7 +130,7 @@ super + shift + d
 
 # Bluetooth management menu (Rofi)
 super + ctrl + b
-    rofi-bluetooth
+    ~/.local/bin/bluetooth-menu
 
 # Hardware volume keys
 XF86Audio{RaiseVolume,LowerVolume,Mute}

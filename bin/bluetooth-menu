@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# Bluetooth menu: connect devices, switch the A2DP codec, forget a device.
+#
+# Device names come from BlueZ's alias, so the list never shows a bare MAC
+# address unless the device really has no name. Codecs are the separate A2DP
+# profiles that PipeWire exposes for a connected device, so choosing one is a
+# `pactl set-card-profile` call instead of a disconnect/reconnect dance.
+#
+# Layout: main list -> per-device menu -> codec list. Every action rebuilds
+# the menu from live BlueZ/PipeWire state.
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/bluetooth-menu.lock"
+flock -n 9 || exit 0
+
+DIVIDER="─────────"
+BACK="Back"
+EXIT="Exit"
+UNKNOWN="Unknown device"
+
+notify() {
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -a Bluetooth -i bluetooth "$@" >/dev/null 2>&1 || true
+}
+
+strip_ansi() {
+    LC_ALL=C sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g'
+}
+
+powered() {
+    bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'
+}
+
+trim() {
+    local s=$1
+    s=${s#"${s%%[![:space:]]*}"}
+    s=${s%"${s##*[![:space:]]}"}
+    printf '%s' "$s"
+}
+
+# Profile id -> short human name.
+codec_label() {
+    case "$1" in
+        a2dp-sink-sbc) echo "SBC" ;;
+        a2dp-sink-sbc_xq) echo "SBC-XQ" ;;
+        a2dp-sink-aac) echo "AAC" ;;
+        a2dp-sink-ldac) echo "LDAC" ;;
+        a2dp-sink-aptx) echo "aptX" ;;
+        a2dp-sink-aptx_hd) echo "aptX HD" ;;
+        a2dp-sink-aptx_ll) echo "aptX LL" ;;
+        a2dp-sink-faststream) echo "FastStream" ;;
+        a2dp-sink-opus) echo "Opus" ;;
+        headset-head-unit) echo "Headset (HFP)" ;;
+        headset-head-unit-cvsd) echo "Headset (HFP, CVSD)" ;;
+        headset-head-unit-msbc) echo "Headset (HFP, mSBC)" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# Cut the "Card #N ... " block for one PipeWire card out of `pactl list cards`.
+card_block() {
+    local card=$1
+    pactl list cards 2>/dev/null | awk -v card="$card" '
+        /^Card #/ {
+            if (found && !printed) { printf "%s", buf; printed = 1 }
+            buf = ""
+            found = 0
+        }
+        { buf = buf $0 ORS }
+        $1 == "Name:" && $2 == card { found = 1 }
+        END { if (found && !printed) printf "%s", buf }
+    '
+}
+
+# Print only the profile lines of a card block.
+profile_lines() {
+    awk '
+        /^[ \t]*Profiles:/ { inp = 1; next }
+        inp && /^[ \t]*Active Profile:/ { inp = 0 }
+        inp && /^[ \t]+[A-Za-z0-9:_-]+: / { print }
+    '
+}
+
+card_name_for() {
+    local mac=${1^^}
+    printf 'bluez_card.%s' "${mac//:/_}"
+}
+
+active_codec_label() {
+    local mac=$1 card block profile
+    card=$(card_name_for "$mac")
+    block=$(card_block "$card")
+    [ -n "$block" ] || return 0
+    profile=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
+    [ -n "$profile" ] && codec_label "$profile"
+}
+
+scan_devices() {
+    notify "Scanning for 10 seconds..."
+    bluetoothctl --timeout 10 scan on >/dev/null 2>&1
+}
+
+# Fill LABELS (menu text) and MACS (parallel addresses). Connected devices
+# come first, then paired, then everything else.
+collect_devices() {
+    LABELS=()
+    MACS=()
+    local -a tmp=()
+    local -A seen=()
+    local tag mac name info state prio label base n batt codec line named
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        read -r tag mac name <<<"$line"
+        [ "$tag" = "Device" ] || continue
+        [ -n "$mac" ] || continue
+
+        info=$(bluetoothctl info "$mac" 2>/dev/null)
+        if grep -q 'Connected: yes' <<<"$info"; then
+            state=connected
+            prio=0
+        elif grep -q 'Paired: yes' <<<"$info"; then
+            state=paired
+            prio=1
+        else
+            state=available
+            prio=2
+        fi
+
+        # A few devices report the address (or nothing) as their name. Hide
+        # such devices while they are unpaired: they are usually BLE beacons
+        # and TVs, and listing them only produces a wall of MAC addresses.
+        named=1
+        [ -n "$name" ] || named=0
+        [[ "$name" =~ ^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$ ]] && named=0
+        [[ "$name" =~ ^[0-9A-Fa-f]{12}$ ]] && named=0
+        if [ "$named" = 0 ]; then
+            [ "$state" = available ] && continue
+            name=$UNKNOWN
+        fi
+
+        batt=$(sed -n 's/^[[:space:]]*Battery Percentage:.*(\([0-9][0-9]*\)).*/\1/p' <<<"$info" | head -n1)
+        codec=""
+        if [ "$state" = connected ] && grep -q '^[[:space:]]*Icon: audio' <<<"$info"; then
+            codec=$(active_codec_label "$mac")
+        fi
+
+        label="$name  ($state"
+        [ -n "$codec" ] && label="$label, $codec"
+        [ -n "$batt" ] && label="$label, ${batt}%"
+        label="$label)"
+
+        base=$label
+        n=2
+        while [ -n "${seen[$label]:-}" ]; do
+            label="$base #$n"
+            n=$((n + 1))
+        done
+        seen[$label]=1
+
+        tmp+=("$prio"$'\t'"$label"$'\t'"$mac")
+    done < <(bluetoothctl devices 2>/dev/null | strip_ansi)
+
+    [ ${#tmp[@]} -gt 0 ] || return 0
+    while IFS=$'\t' read -r prio label mac; do
+        [ -n "$mac" ] || continue
+        LABELS+=("$label")
+        MACS+=("$mac")
+    done < <(printf '%s\n' "${tmp[@]}" | sort -t$'\t' -k1,1n -k2,2)
+}
+
+connect_device() {
+    local mac=$1 name=$2 i
+    notify "Connecting to $name..."
+    timeout 20 bluetoothctl connect "$mac" >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes' && break
+        sleep 0.5
+    done
+    if bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes'; then
+        notify "Connected: $name"
+    else
+        notify "Could not connect to $name"
+    fi
+}
+
+pair_device() {
+    local mac=$1 name=$2
+    notify "Pairing with $name..."
+    timeout 30 bluetoothctl pair "$mac" >/dev/null 2>&1
+    if bluetoothctl info "$mac" 2>/dev/null | grep -q 'Paired: yes'; then
+        bluetoothctl trust "$mac" >/dev/null 2>&1
+        timeout 20 bluetoothctl connect "$mac" >/dev/null 2>&1
+        notify "Paired: $name"
+    else
+        notify "Could not pair with $name"
+    fi
+}
+
+forget_device() {
+    local mac=$1 name=$2 answer
+    answer=$(printf 'No\nYes, forget %s\n' "$name" | rofi -dmenu -i -p "Forget $name?")
+    [[ "$answer" == Yes* ]] || return 1
+    if timeout 10 bluetoothctl remove "$mac" >/dev/null 2>&1; then
+        notify "Forgotten: $name"
+        return 0
+    fi
+    notify "Could not forget $name"
+    return 1
+}
+
+use_audio_sink() {
+    local mac=$1 name=$2 sink id
+    sink=$(pactl list short sinks 2>/dev/null |
+        awk -v m="${mac//:/_}" '$2 ~ "^bluez_output\\." m { print $2; exit }')
+    if [ -z "$sink" ]; then
+        notify "No audio output for $name yet"
+        return
+    fi
+    pactl set-default-sink "$sink" >/dev/null 2>&1 || return
+    while read -r id; do
+        pactl move-sink-input "$id" "$sink" >/dev/null 2>&1
+    done < <(pactl list short sink-inputs 2>/dev/null | awk '{ print $1 }')
+    notify "Audio output: $name"
+}
+
+codec_menu() {
+    local mac=$1 name=$2 card block active line id label choice wanted i
+    card=$(card_name_for "$mac")
+    block=$(card_block "$card")
+    if [ -z "$block" ]; then
+        notify "No audio card for $name: connect it first"
+        return
+    fi
+    active=$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
+
+    local -a opts=() ids=()
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        line=$(trim "$line")
+        id=${line%%:*}
+        case "$id" in
+            a2dp-sink* | headset-head-unit*) ;;
+            *) continue ;;
+        esac
+        label=$(codec_label "$id")
+        [ "$id" = "$active" ] && label="✓ $label"
+        opts+=("$label")
+        ids+=("$id")
+    done < <(printf '%s\n' "$block" | profile_lines)
+
+    if [ ${#opts[@]} -eq 0 ]; then
+        notify "No codec profiles available for $name"
+        return
+    fi
+
+    opts+=("$BACK")
+    choice=$(printf '%s\n' "${opts[@]}" | rofi -dmenu -i -p "Codec: $name")
+    case "$choice" in
+        "" | "$BACK") return ;;
+    esac
+    wanted=${choice#✓ }
+    for i in "${!ids[@]}"; do
+        if [ "$(codec_label "${ids[$i]}")" = "$wanted" ]; then
+            if pactl set-card-profile "$card" "${ids[$i]}" >/dev/null 2>&1; then
+                sleep 1
+                notify "Codec: $wanted"
+            else
+                notify "Could not switch to $wanted"
+            fi
+            return
+        fi
+    done
+}
+
+device_menu() {
+    local mac=$1
+    local info name state choice
+    while :; do
+        info=$(bluetoothctl info "$mac" 2>/dev/null)
+        name=$(sed -n 's/^[[:space:]]*Alias: //p' <<<"$info" | head -n1)
+        [ -n "$name" ] || name=$UNKNOWN
+        [[ "$name" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] && name=$UNKNOWN
+
+        state=available
+        grep -q 'Paired: yes' <<<"$info" && state=paired
+        grep -q 'Connected: yes' <<<"$info" && state=connected
+
+        local -a opts=()
+        if [ "$state" = connected ]; then
+            opts+=("Disconnect")
+            if grep -q '^[[:space:]]*Icon: audio' <<<"$info"; then
+                opts+=("Codec: $(active_codec_label "$mac")")
+                opts+=("Use as audio output")
+            fi
+        elif [ "$state" = paired ]; then
+            opts+=("Connect")
+        else
+            opts+=("Pair and connect")
+        fi
+        if grep -q 'Trusted: yes' <<<"$info"; then
+            opts+=("Trusted: yes")
+        else
+            opts+=("Trusted: no")
+        fi
+        [ "$state" != available ] && opts+=("Forget device")
+        opts+=("$BACK")
+
+        choice=$(printf '%s\n' "${opts[@]}" | rofi -dmenu -i -p "$name")
+        case "$choice" in
+            "" | "$BACK") return ;;
+            Connect) connect_device "$mac" "$name" ;;
+            "Pair and connect") pair_device "$mac" "$name" ;;
+            Disconnect)
+                bluetoothctl disconnect "$mac" >/dev/null 2>&1
+                notify "Disconnected: $name"
+                ;;
+            "Trusted: yes") bluetoothctl untrust "$mac" >/dev/null 2>&1 ;;
+            "Trusted: no") bluetoothctl trust "$mac" >/dev/null 2>&1 ;;
+            "Use as audio output") use_audio_sink "$mac" "$name" ;;
+            "Forget device") forget_device "$mac" "$name" && return ;;
+            Codec:*) codec_menu "$mac" "$name" ;;
+        esac
+    done
+}
+
+main_menu() {
+    local choice i
+    while :; do
+        local -a opts=()
+        if powered; then
+            collect_devices
+            [ ${#LABELS[@]} -gt 0 ] && opts+=("${LABELS[@]}")
+            [ ${#LABELS[@]} -gt 0 ] && opts+=("$DIVIDER")
+            opts+=("Scan for devices")
+            opts+=("Bluetooth: on")
+        else
+            opts+=("Bluetooth: off")
+        fi
+        opts+=("$EXIT")
+
+        choice=$(printf '%s\n' "${opts[@]}" | rofi -dmenu -i -p "Bluetooth" -selected-row 0)
+        case "$choice" in
+            "" | "$EXIT") exit 0 ;;
+            "$DIVIDER") continue ;;
+            "Scan for devices") scan_devices ;;
+            "Bluetooth: on")
+                bluetoothctl power off >/dev/null 2>&1
+                ;;
+            "Bluetooth: off")
+                rfkill unblock bluetooth 2>/dev/null
+                bluetoothctl power on >/dev/null 2>&1
+                ;;
+            *)
+                for i in "${!LABELS[@]}"; do
+                    if [ "${LABELS[$i]}" = "$choice" ]; then
+                        device_menu "${MACS[$i]}"
+                        break
+                    fi
+                done
+                ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    --list)
+        collect_devices
+        printf '%s\n' "${LABELS[@]}"
+        ;;
+    *) main_menu ;;
+esac

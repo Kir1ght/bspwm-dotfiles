@@ -109,6 +109,15 @@ clipboard, screenshots, audio, microphone, power, keyboard layout, and the
 keybinding cheat sheet. Rofi themes are recolored together with the rest of
 the interface.
 
+### 🔵 Bluetooth
+
+`Super + Ctrl + B` opens `bluetooth-menu`. Devices are listed by their BlueZ
+alias, never by a bare MAC address, with state, the active codec and battery
+charge. Per device you can connect or disconnect, pair, trust, pick the A2DP
+codec (SBC, SBC-XQ, AAC, LDAC, aptX, aptX HD — whatever PipeWire offers for
+the connected device), make it the default audio output, or forget it. The
+main menu also rescans for devices and switches the adapter on or off.
+
 ### 📊 Polybar
 
 bspwm desktops, CPU, memory, temperature, GPU, now-playing, weather, battery,
@@ -239,6 +248,7 @@ before copying.
 | `Super + S` | turn off the display after 2 seconds |
 | `Super + Alt + S` | wake the panel if it stayed dark |
 | `Super + D` / `Super + Shift + D` | Whisper: typing, lecture recording |
+| `Super + Ctrl + B` | Bluetooth: connect, codec, pair, forget |
 | `Super + Shift + U` | touchpad: toggle auto-disable while a mouse is connected |
 | `Super + Shift + O` | projector: enable HDMI (NVIDIA) and fullscreen the focused window |
 
