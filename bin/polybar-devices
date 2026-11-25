@@ -10,6 +10,15 @@
 # wakes the radio, so a known value is refreshed only every 5 min; while the
 # mouse has not answered yet it retries every 30 s.
 
+# bspwmrc starts polybar, so the bar and every module script inherit bspwm's
+# IPC sockets (fds 3..7). A long-lived module that keeps such a socket open
+# without reading it lets bspwm block in write() forever: bspc stops answering
+# and the whole desktop freezes. Drop everything we did not open ourselves.
+for _fd in $(seq 3 63); do
+	eval "exec ${_fd}>&-" 2>/dev/null || true
+done
+unset _fd
+
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/polybar-devices.lock"
 flock -n 9 || exit 0
 

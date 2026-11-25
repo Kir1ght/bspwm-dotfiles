@@ -9,9 +9,11 @@ then
     sleep 0.1
   done
   pgrep -x polybar >/dev/null && pkill -9 -x polybar
-  for monitor in $(bspc query -M --names)
+  # Bounded: if bspwm's IPC is wedged, bspc never returns and the toggle
+  # would hang the keybinding (see the polybar/bspwm freeze on 2026-11-25).
+  for monitor in $(timeout 2 bspc query -M --names 2>/dev/null)
   do
-    bspc config -m "$monitor" top_padding 0
+    timeout 2 bspc config -m "$monitor" top_padding 0
   done
 else
   "$HOME/.config/polybar/launch.sh"

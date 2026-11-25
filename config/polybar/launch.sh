@@ -63,13 +63,29 @@ export WLAN_IFACE=$(ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^wl/{print $
 ADAPTER_PATH=$(find /sys/class/power_supply -maxdepth 1 \( -name 'AC*' -o -name 'ADP*' \) 2>/dev/null | head -n1)
 [ -n "$ADAPTER_PATH" ] && export ADAPTER=$(basename "$ADAPTER_PATH")
 
-# Run on the desired monitor
+# Run on the desired monitor.
+# bspwmrc starts this script, so polybar inherits bspwm's IPC sockets (fds
+# 3..7). polybar hands its fds to every module script, and a long-lived script
+# that never reads one of those sockets lets bspwm block in write() forever:
+# bspc stops answering and the desktop freezes (2026-11-25, twice). Start the
+# bar in a subshell with all inherited descriptors closed; polybar opens what
+# it needs itself.
+start_bar() {
+	(
+		for fd in $(seq 3 63); do
+			eval "exec ${fd}>&-" 2>/dev/null || true
+		done
+		exec polybar "$1" -r
+	) >>/tmp/polybar1.log 2>&1 &
+	disown
+}
+
 if [ -n "$MONITOR_EXTERNAL" ]; then
-	polybar top_external -r >>/tmp/polybar1.log 2>&1 9>&- & disown
-	polybar top -r >>/tmp/polybar1.log 2>&1 9>&- & disown
+	start_bar top_external
+	start_bar top
 	echo "Polybar launched for two monitors"
 else
-	polybar top -r >>/tmp/polybar1.log 2>&1 9>&- & disown
+	start_bar top
 	echo "Polybar launched for one monitor..."
 fi
 
@@ -81,7 +97,7 @@ fi
 # bar occupies y=8..44 with height 36 at offset-y 0.5%.)
 bar_top_inset() {
 	# $1 = monitor name; print the bar's bottom edge (y + height) in pixels
-	xwininfo -root -tree 2>/dev/null |
+	timeout 2 xwininfo -root -tree 2>/dev/null |
 		awk -v suffix="_$1\"" '
 			/"polybar-/ && index($0, suffix) {
 				for (i = 1; i <= NF; i++) {
@@ -94,17 +110,20 @@ bar_top_inset() {
 			}'
 }
 
+# Every bspc call is bounded: when bspwm's IPC is wedged, bspc never returns,
+# and an unbounded call here blocks the launcher (and any theme reload that
+# waits on its lock) for as long as the bar stays dead.
 if command -v bspc >/dev/null 2>&1; then
 	for _ in $(seq 1 20); do
 		missing=
-		for monitor in $(bspc query -M --names); do
+		for monitor in $(timeout 2 bspc query -M --names 2>/dev/null); do
 			[ -n "$(bar_top_inset "$monitor")" ] || missing=1
 		done
 		[ -z "$missing" ] && break
 		sleep 0.05
 	done
-	for monitor in $(bspc query -M --names); do
+	for monitor in $(timeout 2 bspc query -M --names 2>/dev/null); do
 		inset=$(bar_top_inset "$monitor")
-		[ -n "$inset" ] && bspc config -m "$monitor" top_padding "$inset"
+		[ -n "$inset" ] && timeout 2 bspc config -m "$monitor" top_padding "$inset"
 	done
 fi

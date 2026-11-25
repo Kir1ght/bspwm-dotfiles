@@ -76,18 +76,25 @@ def candidates():
 def query(dev, cmd, timeout=1.0):
     request = bytes([REPORT_ID, cmd] + [0] * 14 + [(0x4D - cmd) & 0xFF])
     try:
-        fd = os.open(dev, os.O_RDWR)
+        # Non-blocking: an unresponsive dongle must never make the caller wait
+        # inside write() or read(). Both are guarded by select() below.
+        fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     except PermissionError:
         raise
     except OSError:
         return None
     try:
+        _, ready_w, _ = select.select([], [fd], [], timeout)
+        if not ready_w:
+            return None
         if os.write(fd, request) != len(request):
             return None
         ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
             return None
         reply = os.read(fd, REPORT_LEN)
+    except BlockingIOError:
+        return None
     finally:
         os.close(fd)
     if len(reply) < REPORT_LEN or reply[0] != REPORT_ID or reply[1] != cmd:
@@ -109,7 +116,13 @@ def parse(reply, cmd):
     return None
 
 
-def read_battery():
+def read_battery(budget=2.5):
+    """Ask the dongle for the charge, giving up after `budget` seconds.
+
+    polybar polls this from a module script with its own timeout; a sleeping
+    mouse must fail fast instead of holding the label hostage.
+    """
+    deadline = time.monotonic() + budget
     denied = []
     for dev in candidates():
         for cmd, attempts in ((0x04, 2), (0x17, 1)):
@@ -117,13 +130,15 @@ def read_battery():
             # wakes it. Keep the whole exchange short so a silent mouse cannot
             # stall a polybar poll.
             for attempt in range(attempts):
+                if time.monotonic() >= deadline:
+                    break
                 try:
-                    reply = query(dev, cmd)
+                    reply = query(dev, cmd, timeout=min(1.0, max(0.1, deadline - time.monotonic())))
                 except PermissionError:
                     denied.append(dev)
                     break
                 if reply is None:
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                     continue
                 parsed = parse(reply, cmd)
                 if parsed:
