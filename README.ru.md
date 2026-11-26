@@ -154,7 +154,16 @@ xrandr их вообще не видит.
 
 Загруженный в X драйвер NVIDIA стоит около 2 Вт в простое: дискретка больше
 не уходит в runtime suspend. `hdmi-gpu on|off` (нужен sudo и перелогин)
-переключает между «HDMI работает» и «максимальная автономность».
+переключает между «HDMI работает» и «максимальная автономность». `hdmi-gpu on`
+не создаёт файлов, а только убирает `/etc/X11/xorg.conf.d/10-igpu.conf`;
+`hdmi-gpu off` возвращает его из `system/xorg/10-igpu.conf`. `hdmi-gpu status`
+спрашивает сам X-сервер, поэтому честно пишет «on (files) - but the running X
+server has no NVIDIA provider», если драйвер на деле не загрузился.
+
+Начиная с NVIDIA 620 драйвер сам не поднимается для дискретки при каждой
+ревизии ядра; если `xrandr --listproviders` не показывает `NVIDIA-G0`,
+поставь модуль ядра под эту версию (`nvidia-open` для обычного ядра,
+`nvidia-open-dkms` + `linux-headers` для `linux-zen`/`linux-lts`) и перелогинься.
 
 ### 🎙️ Whisper и медиа
 

@@ -329,6 +329,18 @@ install_gpu() {
     sudo udevadm control --reload-rules || true
     sudo udevadm trigger --subsystem-match=pci --attr-match=vendor=0x10de || true
 
+    # Keep the dGPU out of X by default: the internal panel runs on the AMD
+    # iGPU, and a loaded NVIDIA driver cannot runtime-suspend (~2 W idle).
+    # `hdmi-gpu on` renames this file, so never overwrite an existing choice —
+    # neither the active conf nor its .disabled twin.
+    local igpu_conf=/etc/X11/xorg.conf.d/10-igpu.conf xorg_src="$REPO_DIR/system/xorg"
+    if [[ -e "$igpu_conf" || -e "$igpu_conf.disabled" ]]; then
+        log "Xorg NVIDIA policy already configured, leaving it alone."
+    elif [[ -f "$xorg_src/10-igpu.conf" ]]; then
+        log "Installing the iGPU-only Xorg policy (HDMI stays dark until 'hdmi-gpu on')..."
+        sudo install -Dm644 "$xorg_src/10-igpu.conf" "$igpu_conf"
+    fi
+
     if command -v mkinitcpio >/dev/null 2>&1; then
         log "Rebuilding initramfs (mkinitcpio -P)..."
         sudo mkinitcpio -P || warn "mkinitcpio failed; rebuild it manually after reboot."

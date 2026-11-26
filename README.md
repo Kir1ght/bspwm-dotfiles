@@ -157,7 +157,18 @@ picked up by `dual_monitors.sh`.
 
 Loading the NVIDIA driver into X costs about 2 W at idle: the dGPU can no
 longer runtime-suspend. `hdmi-gpu on|off` (needs sudo and a relogin) switches
-between "HDMI works" and "best battery".
+between "HDMI works" and "best battery". `hdmi-gpu on` writes nothing: it only
+removes `/etc/X11/xorg.conf.d/10-igpu.conf`; `hdmi-gpu off` restores it from
+`system/xorg/10-igpu.conf`. `hdmi-gpu status` reads the running server, so it
+reports "on (files) - but the running X server has no NVIDIA provider" when
+the driver is not actually loaded.
+
+Since NVIDIA 620 the driver no longer loads itself for the dGPU under every
+kernel package; `hdmi-gpu status` reads `xrandr --listproviders`, so it reports
+"on (files) - but the running X server has no NVIDIA provider" instead of
+pretending HDMI works. If that happens, install the matching kernel module
+(`nvidia-open` for the stock kernel, `nvidia-open-dkms` + `linux-headers` for
+`linux-zen`/`linux-lts`) and relogin.
 
 ### 🎙️ Whisper and media
 

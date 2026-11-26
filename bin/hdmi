@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Управление внешним HDMI-экраном (выход на дискретной NVIDIA).
+set -u
+
+X() { timeout 6 xrandr "$@"; }
+
+usage() {
+  cat <<'EOF'
+hdmi — внешний экран (HDMI на NVIDIA)
+
+  hdmi on       включить, 1920x1080@60, справа от ноутбука
+  hdmi off      погасить картинку
+  hdmi toggle   переключить            (Super+P)
+  hdmi mirror   дублировать экран      (Super+Alt+P)
+  hdmi 4k       включить 3840x2160@30
+  hdmi status   что подключено
+  hdmi help     эта справка
+EOF
+}
+
+prov=$(timeout 6 xrandr --listproviders 2>/dev/null) || { echo "X не отвечает"; exit 1; }
+nid=$(echo "$prov" | grep -i nvidia | sed -n 's/.*id: \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
+aid=$(echo "$prov" | grep -i AMD    | sed -n 's/.*id: \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
+
+# NVIDIA-выходы уже подцеплены к AMD? Если да — не трогаем:
+# повторный setprovideroutputsource на NVIDIA подвешивает X.
+attached() { echo "$prov" | grep -i nvidia | grep -q "associated providers: 1"; }
+
+ext()   { X --query | awk '/^HDMI-[0-9]+-[0-9]+ connected/{print $1; exit}'; }
+is_on() { local e; e=$(ext); [ -n "$e" ] && X --query | grep -qE "^$e connected [0-9]"; }
+
+case "${1:-status}" in
+  on)
+    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && { X --setprovideroutputsource "$nid" "$aid"; sleep 1; }
+    e=$(ext)
+    [ -z "$e" ] && { echo "внешний экран не виден в X — проверьте кабель HDMI"; exit 1; }
+    X --output "$e" --mode 1920x1080 --rate 60 --right-of eDP-1
+    X --output eDP-1 --pos 0x0
+    echo "вкл: $e 1920x1080@60 справа" ;;
+  off)
+    e=$(ext)
+    [ -z "$e" ] && { echo "внешний экран не найден"; exit 0; }
+    X --output "$e" --mode 1920x1080 --rate 60 --right-of eDP-1
+    X --output "$e" --brightness 0
+    echo "погашен: $e" ;;
+  toggle)
+    if is_on; then exec "$0" off; else exec "$0" on; fi ;;
+  mirror)
+    e=$(ext)
+    [ -z "$e" ] && { echo "внешний экран не найден"; exit 1; }
+    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && X --setprovideroutputsource "$nid" "$aid"
+    X --output "$e" --mode 1920x1080 --rate 60 --same-as eDP-1
+    echo "зеркало: $e" ;;
+  4k|uhd)
+    e=$(ext)
+    [ -z "$e" ] && { echo "внешний экран не найден"; exit 1; }
+    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && X --setprovideroutputsource "$nid" "$aid"
+    X --output "$e" --mode 3840x2160 --rate 30 --right-of eDP-1
+    echo "вкл: $e 3840x2160@30" ;;
+  status)
+    X --query | grep -E " connected" ;;
+  help|-h|--help)
+    usage ;;
+  *)
+    echo "неизвестная команда: $1"; echo; usage; exit 2 ;;
+esac
