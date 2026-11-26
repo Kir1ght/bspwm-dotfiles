@@ -34,7 +34,7 @@ PACMAN_CORE = [
     "cava", "ranger", "ueberzug",
     # CLI / editors / utilities
     "lsd", "bat", "micro", "neovim", "tree", "fastfetch", "btop", "htop",
-    "git", "base-devel", "curl", "wget", "rsync", "pciutils",
+    "git", "base-devel", "curl", "wget", "rsync", "pciutils", "python-pillow",
     # fonts
     "ttf-jetbrains-mono", "ttf-jetbrains-mono-nerd", "ttf-iosevka-nerd",
     "ttf-fira-code", "ttf-meslo-nerd", "ttf-dejavu", "ttf-liberation",
@@ -42,7 +42,7 @@ PACMAN_CORE = [
     "terminus-font", "noto-fonts", "noto-fonts-emoji", "noto-fonts-cjk",
     "cantarell-fonts",
     # GTK / icons
-    "gtk3", "gtk4", "papirus-icon-theme", "lxappearance",
+    "gtk3", "gtk4", "python-gobject", "papirus-icon-theme", "lxappearance",
     # browser
     "firefox",
     # whisper.cpp + audio conversion

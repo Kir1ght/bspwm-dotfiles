@@ -158,7 +158,7 @@ PACMAN_CORE=(
     playerctl python-fonttools
     # CLI / editors / utilities
     lsd bat micro neovim tree fastfetch btop htop git base-devel
-    curl wget rsync pciutils python-pillow
+    curl wget rsync pciutils python-pillow python-gobject
     # fonts
     ttf-jetbrains-mono ttf-jetbrains-mono-nerd ttf-iosevka-nerd ttf-fira-code
     ttf-meslo-nerd ttf-dejavu ttf-liberation ttf-bitstream-vera ttf-opensans

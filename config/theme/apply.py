@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -88,11 +89,12 @@ def lighten(value: str, dl: float = 0.08, ds: float = 0.04) -> str:
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    kwargs.setdefault("timeout", 5)
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
 def pgrep(name: str) -> bool:
-    return run(["pgrep", "-x", name]).returncode == 0
+    return run(["pgrep", "-u", str(os.getuid()), "-x", name]).returncode == 0
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -112,35 +114,11 @@ def write_atomic(path: Path, text: str) -> None:
 
 
 def read_request() -> str | None:
-    """Return the token of the newest apply request, ignoring dead waiters."""
+    """Read without unlinking: a new request can replace the file at any time."""
     try:
-        token = REQUEST_FILE.read_text(encoding="utf-8").strip()
+        return REQUEST_FILE.read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
-    if not token:
-        return None
-    # Requests from older versions were JSON; they cannot be fulfilled, so
-    # drop them instead of wedging the pipeline forever.
-    pid_text = token.split(":", 1)[0]
-    if not pid_text.isdigit():
-        try:
-            REQUEST_FILE.unlink()
-        except OSError:
-            pass
-        return None
-    # A waiter killed while blocked must not keep every future apply stale.
-    if int(pid_text) != os.getpid():
-        try:
-            os.kill(int(pid_text), 0)
-        except ProcessLookupError:
-            try:
-                REQUEST_FILE.unlink()
-            except OSError:
-                pass
-            return None
-        except OSError:
-            pass
-    return token
 
 
 def write_request(token: str) -> None:
@@ -162,6 +140,12 @@ def current_wallpaper(explicit: str | None) -> Path | None:
     if explicit:
         path = Path(explicit).expanduser()
         return path if path.is_file() else None
+    try:
+        path = CURRENT_LINK.resolve(strict=True)
+        if path.is_file():
+            return path
+    except (OSError, RuntimeError):
+        pass
     if FEH_BG.is_file():
         text = FEH_BG.read_text(encoding="utf-8", errors="replace")
         match = re.search(r'--bg-\S+\s+"([^"]+)"', text)
@@ -173,13 +157,6 @@ def current_wallpaper(explicit: str | None) -> Path | None:
             path = Path(match.group(1)).expanduser()
             if path.is_file():
                 return path
-    try:
-        if (CURRENT_LINK.is_symlink() or CURRENT_LINK.exists()):
-            path = CURRENT_LINK.resolve()
-            if path.is_file():
-                return path
-    except OSError:
-        pass
     cached = CACHE / "palette.json"
     if cached.is_file():
         try:
@@ -339,7 +316,7 @@ def build_palette(hue: float, saturation: float) -> dict[str, str]:
 
 def write_polybar(palette: dict[str, str], wallpaper: Path) -> None:
     lines = [
-        "; Generated from " + wallpaper.name,
+        "; Generated from " + wallpaper.name.replace("\n", " ").replace("\r", " "),
         "; by ~/.config/theme/apply.py — do not edit by hand",
         "[colors]",
         f"background = {palette['background']}",
@@ -546,13 +523,13 @@ DRACULA_TO_PALETTE = {
 }
 
 
-def apply_gtk(palette: dict[str, str], cancelled=None) -> None:
+def apply_gtk(palette: dict[str, str], cancelled=None) -> bool:
     """Recolor the installed Dracula GTK theme and activate it as 'Dynamic'."""
     source = HOME / ".themes" / "Dracula"
     target = HOME / ".themes" / "Dynamic"
     if not source.is_dir():
         log("gtk: ~/.themes/Dracula not found, skipped")
-        return
+        return True
 
     check = cancelled if cancelled is not None else (lambda: False)
 
@@ -569,14 +546,48 @@ def apply_gtk(palette: dict[str, str], cancelled=None) -> None:
             and marker.read_text(encoding="utf-8").strip() == stamp
             and settings_ok and (CFG / "gtk-4.0" / "gtk.css").is_file()):
         log("gtk: up to date")
-        return
+        return True
 
     if check():
         log("gtk: skipped; wallpaper changed")
-        return
+        return False
+
+    with tempfile.TemporaryDirectory(prefix=".dynamic-", dir=target.parent) as work:
+        staged = Path(work) / "new"
+        if not stage_gtk(source, staged, palette, check):
+            return False
+        previous = Path(work) / "previous"
+        if target.exists() or target.is_symlink():
+            target.rename(previous)
+        try:
+            staged.rename(target)
+        except OSError:
+            if previous.exists() or previous.is_symlink():
+                previous.rename(target)
+            raise
+
+    gtk4 = target / "gtk-4.0"
+    user_gtk4 = CFG / "gtk-4.0"
+    for name in ("gtk.css", "gtk-dark.css"):
+        candidate = gtk4 / name
+        if candidate.is_file():
+            write_atomic(user_gtk4 / name, candidate.read_text(encoding="utf-8"))
+
+    for settings in (CFG / "gtk-3.0" / "settings.ini", CFG / "gtk-4.0" / "settings.ini"):
+        if settings.is_file():
+            text = settings.read_text(encoding="utf-8")
+            changed = re.sub(r"(?m)^gtk-theme-name=.*$", "gtk-theme-name=Dynamic", text)
+            if changed != text:
+                write_atomic(settings, changed)
+    write_atomic(marker, stamp + "\n")
+    log("gtk: recolored Dracula -> Dynamic")
+    return True
+
+
+def stage_gtk(source: Path, target: Path, palette: dict[str, str], check) -> bool:
 
     # Refresh from the pristine source so a second wallpaper change is clean.
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    shutil.copytree(source, target)
 
     mapping = {key: palette[value] for key, value in DRACULA_TO_PALETTE.items()}
     text_suffixes = {".css", ".scss", ".svg", ".qml", ".rc", ".theme", ".xml"}
@@ -586,7 +597,7 @@ def apply_gtk(palette: dict[str, str], cancelled=None) -> None:
         # moves to another wallpaper: the newer apply will recolor from source.
         if position % 64 == 0 and check():
             log("gtk: aborted mid-recolor; wallpaper changed")
-            return
+            return False
         if not path.is_file() or path.suffix.lower() not in text_suffixes:
             continue
         try:
@@ -599,14 +610,11 @@ def apply_gtk(palette: dict[str, str], cancelled=None) -> None:
             text,
         )
         if changed != text:
-            try:
-                write_atomic(path, changed)
-            except OSError:
-                pass
+            write_atomic(path, changed)
 
     if check():
         log("gtk: aborted before commit; wallpaper changed")
-        return
+        return False
 
     index = target / "index.theme"
     if index.is_file():
@@ -616,29 +624,7 @@ def apply_gtk(palette: dict[str, str], cancelled=None) -> None:
         except OSError:
             pass
 
-    gtk4 = target / "gtk-4.0"
-    user_gtk4 = CFG / "gtk-4.0"
-    user_gtk4.mkdir(parents=True, exist_ok=True)
-    for name in ("gtk.css", "gtk-dark.css"):
-        candidate = gtk4 / name
-        if candidate.is_file():
-            try:
-                shutil.copyfile(candidate, user_gtk4 / name)
-            except OSError:
-                pass
-
-    for settings in (CFG / "gtk-3.0" / "settings.ini", CFG / "gtk-4.0" / "settings.ini"):
-        if not settings.is_file():
-            continue
-        try:
-            text = settings.read_text(encoding="utf-8")
-            changed = re.sub(r"(?m)^gtk-theme-name=.*$", "gtk-theme-name=Dynamic", text)
-            if changed != text:
-                write_atomic(settings, changed)
-        except OSError:
-            pass
-    write_atomic(marker, stamp + "\n")
-    log("gtk: recolored Dracula -> Dynamic")
+    return not check()
 
 
 # --------------------------------------------------------------------------
@@ -658,7 +644,7 @@ def reload_polybar() -> None:
     if not launch.is_file():
         return
     try:
-        result = run([str(launch)], timeout=20)
+        result = run([str(launch), "--reload"], timeout=20)
     except subprocess.TimeoutExpired:
         log("polybar: launch.sh timed out")
         return
@@ -682,19 +668,7 @@ def reload_dunst() -> None:
         if result is not None and result.returncode == 0:
             log("dunst: reloaded via dunstctl")
             return
-    run(["pkill", "-x", "dunst"])
-    for _ in range(50):
-        if not pgrep("dunst"):
-            break
-        time.sleep(0.1)
-    if (CFG / "bspwm" / "dunstrc").is_file():
-        subprocess.Popen(
-            ["dunst", "-config", str(CFG / "bspwm" / "dunstrc")],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        log("dunst: restarted")
+    log("dunst: live reload unavailable; colors will apply next login")
 
 
 def apply_bspwm(palette: dict[str, str]) -> None:
@@ -706,7 +680,12 @@ def apply_bspwm(palette: dict[str, str]) -> None:
         ("active_border_color", palette["accent2"]),
         ("presel_feedback_color", palette["fg_dim"]),
     ):
-        run(["bspc", "config", key, value])
+        try:
+            if run(["bspc", "config", key, value], timeout=1).returncode:
+                return
+        except subprocess.TimeoutExpired:
+            log("bspwm: IPC timeout")
+            return
     log("bspwm: border colors applied")
 
 
@@ -760,23 +739,17 @@ def apply_palette(args: argparse.Namespace, superseded=None) -> int:
         print(json.dumps(palette, indent=2, ensure_ascii=False))
         return 0
 
+    stale = superseded if superseded is not None else (lambda: False)
+    if stale() or moved():
+        log("theme: wallpaper changed during generation; deferring")
+        return 0
     write_polybar(palette, wallpaper)
     write_alacritty(palette)
     write_rofi(palette)
     write_bspwm(palette)
     patch_dunst(palette)
     patch_zathura(palette)
-
-    if moved():
-        log("theme: wallpaper changed during generation; deferring")
-        return 0
-
-    # This is a complete generation result: persist it before any consumer is
-    # touched, so palette.json and the color files can never describe different
-    # wallpapers.
     write_atomic(CACHE / "palette.json", json.dumps(palette, indent=2, ensure_ascii=False) + "\n")
-
-    stale = superseded if superseded is not None else (lambda: False)
 
     # If the user is still cycling wallpapers, skip the expensive work. The
     # newest apply does the heavy work once.
@@ -789,21 +762,20 @@ def apply_palette(args: argparse.Namespace, superseded=None) -> int:
     # last and can be aborted as soon as another wallpaper is picked.
     if not args.no_reload:
         reload_polybar()
-        reload_dunst()
+        if not stale() and not moved():
+            reload_dunst()
     # Borders are cheap and must follow the palette even at bspwm startup.
-    apply_bspwm(palette)
+    if not stale() and not moved():
+        apply_bspwm(palette)
 
-    # Record completion for full applies. `--no-reload` (bspwmrc startup) and
-    # `--no-gtk` leave a consumer stale, so they must not make a later full
-    # apply believe this wallpaper was already applied.
-    if (not args.no_reload and not args.no_gtk and not moved()):
-        write_atomic(CACHE / "apply.last", wallpaper_identity(wallpaper) + "\n")
-
+    gtk_done = False
     if not args.no_gtk:
         if stale() or moved():
             log("theme: newer request pending; skipping GTK")
         else:
-            apply_gtk(palette, cancelled=moved)
+            gtk_done = apply_gtk(palette, cancelled=lambda: stale() or moved())
+    if gtk_done and not args.no_reload and not stale() and not moved():
+        write_atomic(CACHE / "apply.last", wallpaper_identity(wallpaper) + "\n")
 
     log(f"theme: {wallpaper} hue={hue:.0f} sat={saturation:.2f} accent={palette['accent']}")
 
@@ -872,12 +844,6 @@ def main() -> int:
         fcntl.flock(lock, fcntl.LOCK_EX)
 
         current = read_request()
-        if current is None:
-            # A dead/newer waiter's token was pruned while we waited; ours was
-            # overwritten by it. Re-publish and continue.
-            log("apply: request token pruned; re-publishing")
-            write_request(token)
-            current = read_request()
         if current != token:
             # A newer live invocation is queued/consumed after us; it owns the
             # final state.
@@ -893,11 +859,6 @@ def main() -> int:
         if (pending_key and pending_key == last_apply_key()
                 and palette_file_matches(pending_path)):
             log("apply: palette already current")
-            if read_request() == token:
-                try:
-                    REQUEST_FILE.unlink()
-                except FileNotFoundError:
-                    pass
             return 0
 
         while True:
@@ -924,11 +885,6 @@ def main() -> int:
             )
             if read_request() not in (None, token):
                 return 0
-            if read_request() == token:
-                try:
-                    REQUEST_FILE.unlink()
-                except FileNotFoundError:
-                    pass
             return result
 
 

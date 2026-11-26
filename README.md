@@ -58,38 +58,17 @@ original every time. You can rebuild the palette manually:
 ### 🖼️ Anime Wall — art browser
 
 `Ctrl + Alt + A` — or the **Anime Wall** entry in the rofi launcher
-(`Super + Space`). A **tag search field** opens right away: type what you want
-and press Enter. It searches **Yande.re, Konachan, Danbooru, and Gelbooru**.
+(`Super + Space`). This opens a single GTK4 window for **Yande.re, Konachan,
+Danbooru, and Gelbooru**. Pick the provider and enter space-separated tags
+(`landscape night`), then click **Search** or press `Enter`. Tag suggestions,
+filters and paging are visible controls; `Ctrl + L` returns to the search.
 
-- `Enter` starts the search, `Alt + F` opens filters (rating, score, size,
-  orientation, sorting), `Alt + P` switches the provider quickly,
-  `Alt + Q` quits;
-- `Tab` (or `Alt + T`) shows tag suggestions: the unfinished tag is searched
-  on the booru, and the post count is shown next to each suggestion. The
-  selected tag is inserted into the field, so you can enter several separated
-  by spaces (`landscape night`); `Tab` on an empty input shows popular
-  tags;
-- results are shown as a thumbnail grid — scroll with the mouse or arrow keys.
-  While thumbnails are still loading, the status line shows how many are left;
-- `Enter` by default **only saves**; `Alt + A` applies the image as the
-  wallpaper; `Alt + S` saves without changing the wallpaper. An applied image
-  is copied to `~/Images/Wallpaper_desktop`, so you can find it later in the
-  wallpaper selector;
-- `Alt + N` goes to the next page, `Alt + B` to the previous one, `Alt + G`
-  opens a page picker (or lets you type a number), `Alt + R` reloads
-  thumbnails that finished loading in the background, `Alt + Q` quits, `Esc`
-  goes back to the search. If a page is empty, the browser returns to the
-  last page with results;
-- already downloaded art is marked with `✓`;
-- files are stored in `~/Pictures/kiri-vault/<Provider>/` — each booru has
-  its own folder;
-- network requests have timeouts, results and thumbnails are cached, and
-  downloads run in the background — the interface does not freeze even if the
-  server is unavailable.
-
-<a href="Images/anime-wall.png">
-  <img src="Images/anime-wall.png" alt="Anime Wall — anime art browser" width="78%">
-</a>
+Select an image to see its preview and details. **Download** leaves the
+current wallpaper unchanged; **Set wallpaper** applies the art and adds it
+to `~/Images/Wallpaper_desktop`. Downloads appear in
+`~/Pictures/kiri-vault/<Provider>/` and are marked `✓` in the gallery.
+Search, thumbnails and downloads run in the background. The old menu is
+still available via `anime-wall --rofi`.
 
 ### 🚀 Fastfetch with Asuna
 
@@ -149,26 +128,21 @@ The HDMI port is wired to the discrete NVIDIA GPU, while the internal panel
 and the X session run on the AMD iGPU. X cannot see the port until the NVIDIA
 outputs are attached as a PRIME display-offload sink.
 
-Plug the cable, focus the slideshow and press `Super + Shift + O`
-(`hdmi-present on --window`): the HDMI output is enabled, placed next to the
-internal panel, and the focused window goes there fullscreen. The same script
-runs in `setup` mode at login, so a projector connected before `startx` is
-picked up by `dual_monitors.sh`.
+Plug in the cable and press `Super + Shift + O` to mirror the desktop or
+turn HDMI off. `hdmi mirror` scales the whole laptop desktop to the external
+output; it never moves or fullscreens a window. If a projector shows a
+stale frame or rejects scaling, try `hdmi mirror --common`: both displays
+use a common mode without a transform. `hdmi off` restores the original
+laptop mode. For a separate desktop use `hdmi extend`; the old fullscreen
+window workflow is still available as `hdmi-present on --window`.
 
-Loading the NVIDIA driver into X costs about 2 W at idle: the dGPU can no
-longer runtime-suspend. `hdmi-gpu on|off` (needs sudo and a relogin) switches
-between "HDMI works" and "best battery". `hdmi-gpu on` writes nothing: it only
-removes `/etc/X11/xorg.conf.d/10-igpu.conf`; `hdmi-gpu off` restores it from
-`system/xorg/10-igpu.conf`. `hdmi-gpu status` reads the running server, so it
-reports "on (files) - but the running X server has no NVIDIA provider" when
-the driver is not actually loaded.
-
-Since NVIDIA 620 the driver no longer loads itself for the dGPU under every
-kernel package; `hdmi-gpu status` reads `xrandr --listproviders`, so it reports
-"on (files) - but the running X server has no NVIDIA provider" instead of
-pretending HDMI works. If that happens, install the matching kernel module
-(`nvidia-open` for the stock kernel, `nvidia-open-dkms` + `linux-headers` for
-`linux-zen`/`linux-lts`) and relogin.
+`hdmi status` shows the connectors; `hdmi-gpu status` distinguishes the
+running X server from the policy for the next login. `hdmi-gpu on|off`
+changes the iGPU-only override for the next login, only using sudo if a
+change is needed. A visible NVIDIA provider doesn't confirm the projector
+is connected. If the provider is absent, check the Xorg log and the NVIDIA
+module for the running kernel before changing packages. Keeping NVIDIA in
+X can cost battery on this laptop.
 
 ### 🎙️ Whisper and media
 
@@ -269,7 +243,7 @@ before copying.
 | `Super + D` / `Super + Shift + D` | Whisper: typing, lecture recording |
 | `Super + Ctrl + B` | Bluetooth: connect, codec, pair, forget |
 | `Super + Shift + U` | touchpad: toggle auto-disable while a mouse is connected |
-| `Super + Shift + O` | projector: enable HDMI (NVIDIA) and fullscreen the focused window |
+| `Super + Shift + O` | projector: toggle HDMI mirroring |
 
 Media keys and Fn brightness keys are also bound in sxhkd.
 
@@ -347,11 +321,11 @@ scan — there are no downloaded-image lists.
 `~/.current_wallpaper` and `~/.current_lockscreen` are stable symlinks to the
 current source files. `random_wallpaper` updates them atomically;
 `screen-lock` reads `~/.current_lockscreen` (with a fallback to the first file
-in `Wallpaper_lockscreen`). `~/.fehbg` still stores an on-screen copy of the
-desktop for fast restore at login, and the palette is built from it. Changing
-the lock screen wallpaper does not affect the palette.
+in `Wallpaper_lockscreen`). `~/.fehbg` references the screen-sized copy for
+fast restore; the palette follows `~/.current_wallpaper`. Changing the lock
+screen wallpaper does not affect the palette.
 
-Art applied from Anime Wall (`Alt + A`) is automatically copied to
+Art applied from Anime Wall (**Set wallpaper**) is automatically copied to
 `~/Images/Wallpaper_desktop` — the same library the selector browses — so you
 can pick it later.
 
@@ -377,9 +351,12 @@ Yande.re and Konachan work without keys. **Gelbooru** requires `api_key` and
 sometimes blocked by Cloudflare: if the API returns 403/503, open the site in
 Firefox or wait — Anime Wall will show an error and will not hang.
 
-`--download` stores files in the same place,
-`~/Pictures/kiri-vault/<Provider>/`. If you only want to build a collection,
-leave `on_enter = save` — that is the default.
+Search results and previews are cached; older results remain available on
+provider errors. Downloads run in the background with a deadline and only
+validated images are moved into the vault. If multiple Apply requests are
+queued, the last online selection wins. `--download` stores files in the same place,
+`~/Pictures/kiri-vault/<Provider>/`. To build a collection without changing
+your desktop, use **Download**.
 
 ## 🌦️ Weather
 
@@ -589,8 +566,10 @@ requested brightness is unchanged, so the driver never re-applies it).
 - `v2raya-bin` (v2rayA) together with the `xray` core and `upscayl-bin`
   (Upscayl) are installed by default. The v2rayA service is enabled
   separately: `sudo systemctl enable --now v2raya`.
-- `anime-wall` uses only the Python standard library; fastfetch's ANSI art
-  needs `python-pillow`.
+- `anime-wall` uses `curl`, `python-pillow` and `python-gobject`/GTK4.
+  Caffeine holds the X11 saver and DPMS off, then restores the previous
+  timers when disabled. KDE Connect starts via the session bus
+  when installed; no window or tray indicator is launched.
 
 ## 📂 Structure
 

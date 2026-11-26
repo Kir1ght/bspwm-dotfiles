@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """anime-wall — anime art browser for bspwm.
 
-Search Yande.re, Konachan, Danbooru and Gelbooru from rofi, preview the
+Search Yande.re, Konachan, Danbooru and Gelbooru in a GTK gallery, preview the
 results as a thumbnail grid, then save the picture you like or apply it as
 the wallpaper through random_wallpaper (which also rebuilds the palette).
 
-The downloader is deliberately self contained: only the Python standard
-library is used for HTTP, so the package list does not grow. Preview images
+HTTP uses curl (already installed by the installer) for hard transfer
+deadlines. Preview images
 are cached in ~/.cache/anime-wall, full images go to
 ~/Pictures/kiri-vault/<Provider>/ by default.
 
 Usage:
-    anime-wall                          open the rofi browser
+    anime-wall                          open the GTK browser
+    anime-wall --rofi                   open the legacy rofi browser
     anime-wall --print                  print the results as JSON
     anime-wall --download 5             download the first five results
     anime-wall -p konachan -t landscape print Konachan results
@@ -23,7 +24,6 @@ import argparse
 import configparser
 import concurrent.futures
 import fcntl
-import filecmp
 import hashlib
 import json
 import os
@@ -31,10 +31,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -53,6 +53,9 @@ PREVIEW_BUDGET = 2.5
 DOWNLOAD_TIMEOUT = 120
 API_CACHE_TTL = 300
 PREVIEW_CACHE_TTL = 60 * 60 * 24 * 30
+API_MAX_BYTES = 12 * 1024 * 1024
+PREVIEW_MAX_BYTES = 6 * 1024 * 1024
+DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
 
 RATING_CHOICES = ("safe", "questionable", "explicit", "all")
 ORIENTATION_CHOICES = ("any", "landscape", "portrait", "square")
@@ -130,7 +133,7 @@ orientation = any
 sort = score
 # What Enter does in the result grid: apply (set as wallpaper) or save.
 on_enter = save
-preview_workers = 16
+preview_workers = 8
 
 # Gelbooru wants an account API key and user id.
 # https://gelbooru.com/index.php?page=account&s=options
@@ -188,12 +191,15 @@ def load_config(path: Path | None = None) -> configparser.ConfigParser:
 def save_config(parser: configparser.ConfigParser, path: Path | None = None) -> None:
     path = path or config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".ini.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        parser.write(handle)
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
-    os.chmod(path, 0o600)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                     dir=path.parent, delete=False) as handle:
+        tmp = Path(handle.name)
+        try:
+            parser.write(handle)
+            handle.close()
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def state_file() -> Path:
@@ -202,16 +208,27 @@ def state_file() -> Path:
 
 def load_state() -> dict:
     try:
-        return json.loads(state_file().read_text(encoding="utf-8"))
+        value = json.loads(state_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(value, dict):
+        return {}
+    tags = value.get("last_tags")
+    value["last_tags"] = ({key: text for key, text in tags.items() if isinstance(text, str)}
+                          if isinstance(tags, dict) else {})
+    return value
 
 
 def save_state(state: dict) -> None:
+    path = state_file()
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
     try:
-        state_file().write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(path)
     except OSError:
         pass
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def expand(path: str) -> Path:
@@ -239,7 +256,7 @@ class Settings:
     download_dir: Path = field(
         default_factory=lambda: Path.home() / "Pictures" / "kiri-vault"
     )
-    preview_workers: int = 16
+    preview_workers: int = 8
 
     @classmethod
     def from_config(cls, parser: configparser.ConfigParser) -> "Settings":
@@ -285,7 +302,7 @@ class Settings:
             per_page=max(1, min(number("per_page", 24), 200)),
             on_enter=on_enter,
             download_dir=download_dir,
-            preview_workers=max(1, min(number("preview_workers", 16), 32)),
+            preview_workers=max(1, min(number("preview_workers", 8), 8)),
         )
 
     def clamp(self) -> None:
@@ -303,7 +320,8 @@ class Settings:
         self.page = max(1, self.page)
 
 
-def persist_settings(settings: Settings, parser: configparser.ConfigParser) -> None:
+def persist_settings(settings: Settings, parser: configparser.ConfigParser,
+                     path: Path | None = None) -> None:
     """Remember filter changes so the next launch starts where the user left."""
     if not parser.has_section("general"):
         parser.add_section("general")
@@ -360,14 +378,14 @@ class Post:
 
     def normalized_rating(self) -> str:
         raw = (self.rating or "").lower()
-        if raw in {"s", "safe", "g", "general"}:
+        if raw in {"safe", "g", "general"} or (
+            raw == "s" and self.provider in {"yandere", "konachan"}
+        ):
             return "safe"
         if raw in {"q", "questionable"}:
             return "questionable"
         if raw in {"e", "explicit"}:
             return "explicit"
-        if raw == "sensitive":
-            return "safe"
         return "unknown"
 
     def label(self) -> str:
@@ -375,44 +393,75 @@ class Post:
         return f"{size}   ★{self.score}"
 
 
+def web_url(value: object, base: str = "") -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        url = urllib.parse.urljoin(base, value)
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme in {"https", "http"} and parts.hostname and not parts.username:
+            return url
+    except ValueError:
+        pass
+    return ""
+
+
+def transfer(url: str, headers: dict[str, str], target: Path,
+             timeout: int, max_bytes: int) -> int:
+    """A whole-transfer timeout (DNS, redirects and slow reads included)."""
+    if not web_url(url):
+        raise BooruError("invalid HTTP URL")
+    # Avoid putting credentials (including Gelbooru's query string) in argv
+    # or printing curl error text that can contain the request URL.
+    options = [f"url = {json.dumps(url, ensure_ascii=False)}"]
+    options += [f"header = {json.dumps(f'{key}: {value}', ensure_ascii=False)}"
+                for key, value in headers.items()]
+    try:
+        result = subprocess.run(
+            ["curl", "-q", "--config", "-", "--silent", "--location",
+             "--max-redirs", "5", "--proto", "=http,https",
+             "--proto-redir", "=https" if url.startswith("https:") else "=http,https",
+             "--connect-timeout", str(min(timeout, 4)), "--max-time", str(timeout),
+             "--max-filesize", str(max_bytes), "--output", str(target),
+             "--write-out", "%{http_code}"],
+            input="\n".join(options) + "\n", text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=timeout + 1, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise BooruError("curl is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise BooruError("request timed out") from exc
+    if result.returncode == 28:
+        raise BooruError("request timed out")
+    if result.returncode == 63 or (target.is_file() and target.stat().st_size > max_bytes):
+        raise BooruError("response exceeds the size limit")
+    if result.returncode:
+        raise BooruError(f"network transfer failed (curl {result.returncode})")
+    return int(result.stdout)
+
+
 def http_json(
     url: str, params: dict, headers: dict | None = None, timeout: int = API_TIMEOUT
 ) -> object:
     query = urllib.parse.urlencode(params)
-    full = f"{url}?{query}" if query else url
+    full = f"{url}{'&' if '?' in url else '?'}{query}" if query else url
     request_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if headers:
         request_headers.update(headers)
-    request = urllib.request.Request(full, headers=request_headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read()
-    except urllib.error.HTTPError as exc:
-        body = exc.read()
-        snippet = body[:400].decode("utf-8", "replace")
-        if exc.code == 401:
-            raise BooruError(
-                "Gelbooru needs an API key and user id. "
-                "Open the browser menu → “Gelbooru credentials” or fill "
-                "~/.config/anime-wall/config.ini."
-            ) from exc
-        if exc.code == 403 and "Just a moment" in snippet:
-            raise BooruError(
-                "Cloudflare blocked the API request. Open the site once in "
-                "Firefox, then try again; Danbooru often requires JS."
-            ) from exc
-        if exc.code == 429:
-            raise BooruError("Rate limited by the booru. Wait a minute and retry.") from exc
-        if exc.code == 503 and "Downbooru" in snippet:
-            raise BooruError("Danbooru is down right now (503 Downbooru).") from exc
-        raise BooruError(f"HTTP {exc.code} from {urllib.parse.urlparse(url).netloc}") from exc
-    except urllib.error.URLError as exc:
-        raise BooruError(f"network error: {exc.reason}") from exc
+    with tempfile.TemporaryDirectory(prefix="anime-wall-") as directory:
+        target = Path(directory) / "response"
+        status = transfer(full, request_headers, target, timeout, API_MAX_BYTES)
+        if status == 429:
+            raise BooruError("Rate limited by the booru. Wait a minute and retry.")
+        if status in (401, 403):
+            raise BooruError(f"HTTP {status}: check credentials or the provider's access policy.")
+        if not 200 <= status < 300:
+            raise BooruError(f"HTTP {status} from {urllib.parse.urlsplit(url).hostname}")
+        body = target.read_bytes() if target.is_file() else b""
     try:
         return json.loads(body)
     except ValueError as exc:
-        snippet = body[:200].decode("utf-8", "replace")
-        raise BooruError(f"the booru returned non-JSON data: {snippet!r}") from exc
+        raise BooruError("the booru returned non-JSON data") from exc
 
 
 def api_cache_key(settings: Settings) -> str:
@@ -555,7 +604,7 @@ def fetch_tag_suggestions(
         raw = data if isinstance(data, list) else []
         for entry in raw:
             if isinstance(entry, dict) and entry.get("name"):
-                items.append((str(entry["name"]), int(entry.get("count") or 0)))
+                items.append((str(entry["name"]), number_or(entry.get("count"))))
     elif provider == "danbooru":
         params = {
             "search[name_matches]": f"{prefix}*",
@@ -568,7 +617,7 @@ def fetch_tag_suggestions(
         for entry in raw:
             if isinstance(entry, dict) and entry.get("name"):
                 items.append(
-                    (str(entry["name"]), int(entry.get("post_count") or 0))
+                    (str(entry["name"]), number_or(entry.get("post_count")))
                 )
     else:  # gelbooru
         params = {"page": "autocomplete2", "term": prefix, "limit": limit}
@@ -766,6 +815,13 @@ def fetch_posts(
     return build_posts(raw, provider, site, settings)
 
 
+def number_or(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def normalize(item: dict, provider: str, site: str) -> Post | None:
     if not isinstance(item, dict):
         return None
@@ -781,10 +837,10 @@ def normalize(item: dict, provider: str, site: str) -> Post | None:
         or item.get("large_file_url")
         or file_url
     )
-    if not file_url or not preview_url:
+    file_url = web_url(file_url, site + "/")
+    if not file_url:
         return None
-    if urllib.parse.urlparse(file_url).scheme not in {"http", "https"}:
-        return None
+    preview_url = web_url(preview_url, site + "/") or file_url
     extension = Path(urllib.parse.urlparse(file_url).path).suffix.lower()
     if extension and extension not in IMAGE_EXTENSIONS:
         return None
@@ -792,35 +848,22 @@ def normalize(item: dict, provider: str, site: str) -> Post | None:
     width = item.get("width") or item.get("image_width") or 0
     height = item.get("height") or item.get("image_height") or 0
     tags = item.get("tags") or item.get("tag_string") or ""
-    try:
-        post_id = int(item.get("id"))
-    except (TypeError, ValueError):
+    post_id = number_or(item.get("id"))
+    if post_id <= 0:
         return None
-    try:
-        score = int(item.get("score") or 0)
-    except (TypeError, ValueError):
-        score = 0
-    try:
-        file_size = int(item.get("file_size") or 0)
-    except (TypeError, ValueError):
-        file_size = 0
-    try:
-        created_at = int(item.get("created_at") or 0)
-    except (TypeError, ValueError):
-        created_at = 0
 
     return Post(
         provider=provider,
         id=post_id,
         file_url=file_url,
         preview_url=preview_url,
-        width=int(width or 0),
-        height=int(height or 0),
-        score=score,
+        width=max(0, number_or(width)),
+        height=max(0, number_or(height)),
+        score=number_or(item.get("score")),
         rating=str(item.get("rating") or ""),
-        tags=tags,
-        file_size=file_size,
-        created_at=created_at,
+        tags=tags if isinstance(tags, str) else "",
+        file_size=max(0, number_or(item.get("file_size"))),
+        created_at=number_or(item.get("created_at")),
         site=site,
     )
 
@@ -828,7 +871,7 @@ def normalize(item: dict, provider: str, site: str) -> Post | None:
 def passes_filters(post: Post, settings: Settings) -> bool:
     if settings.rating != "all":
         rating = post.normalized_rating()
-        if rating != "unknown" and rating != settings.rating:
+        if rating != settings.rating:
             return False
     if post.score < settings.min_score:
         return False
@@ -886,46 +929,55 @@ def valid_image_file(path: Path, size: int = 16) -> bool:
         return False
 
 
+def image_headers(post: Post) -> dict[str, str]:
+    return {"User-Agent": USER_AGENT, "Referer": post.site + "/",
+            "Accept": "image/webp,image/*,*/*;q=0.8"}
+
+
+def valid_download(path: Path) -> bool:
+    if not valid_image_file(path):
+        return False
+    from PIL import Image
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, EOFError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+    return True
+
+
 def download(post: Post, folder: Path) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / safe_name(post)
-    lock = target.with_suffix(target.suffix + ".lock")
-    try:
-        with lock.open("a") as lock_handle:
-            fcntl.flock(lock_handle, fcntl.LOCK_EX)
-            if target.exists() and target.stat().st_size > 0:
-                return target
-
-            request = urllib.request.Request(
-                post.file_url,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Referer": post.site + "/",
-                    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-                },
-            )
-            tmp = target.with_suffix(target.suffix + ".part")
+    # Keep the lock inode stable across waiters; bounded shards avoid one
+    # persistent file per image and leave the download library uncluttered.
+    lock = cache_dir() / f"download-{post.id % 256}.lock"
+    with lock.open("a") as handle:
+        deadline = time.monotonic() + 5
+        while True:
             try:
-                with urllib.request.urlopen(
-                    request, timeout=DOWNLOAD_TIMEOUT
-                ) as response, tmp.open("wb") as handle:
-                    shutil.copyfileobj(response, handle, length=1024 * 256)
-            except urllib.error.HTTPError as exc:
-                tmp.unlink(missing_ok=True)
-                raise BooruError(f"download failed: HTTP {exc.code}") from exc
-            except urllib.error.URLError as exc:
-                tmp.unlink(missing_ok=True)
-                raise BooruError(f"download failed: {exc.reason}") from exc
-            except (OSError, TimeoutError) as exc:
-                tmp.unlink(missing_ok=True)
-                raise BooruError(f"download failed: {exc}") from exc
-            if not valid_image_file(tmp):
-                tmp.unlink(missing_ok=True)
-                raise BooruError("download failed: server returned a non-image")
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise BooruError("download already running; try again later") from exc
+                time.sleep(0.15)
+        if valid_download(target):
+            return target
+        if post.file_size > DOWNLOAD_MAX_BYTES:
+            raise BooruError("image exceeds the download size limit")
+        tmp = target.with_suffix(target.suffix + ".part")
+        try:
+            status = transfer(post.file_url, image_headers(post), tmp,
+                              DOWNLOAD_TIMEOUT, DOWNLOAD_MAX_BYTES)
+            if not 200 <= status < 300:
+                raise BooruError(f"download failed: HTTP {status}")
+            if not valid_download(tmp):
+                raise BooruError("download failed: invalid image")
             tmp.replace(target)
             return target
-    finally:
-        lock.unlink(missing_ok=True)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def notify(title: str, body: str, timeout: int = 2500) -> None:
@@ -963,59 +1015,15 @@ def wallpaper_apply_command() -> list[str] | None:
 
 def apply_wallpaper(path: Path) -> None:
     command = wallpaper_apply_command()
-    if command:
-        result = subprocess.run(command + ["--set", str(path)], check=False)
-        if result.returncode == 0:
-            return
-    feh = shutil.which("feh")
-    if feh:
-        subprocess.run([feh, "--no-fehbg", "--bg-fill", str(path)], check=False)
-        return
-    raise BooruError("neither random_wallpaper nor feh is installed")
-
-
-def wallpaper_folder() -> Path:
-    """The desktop wallpaper library scanned by random_wallpaper."""
-    return Path.home() / "Images" / "Wallpaper_desktop"
-
-
-def archive_wallpaper(source: Path) -> Path:
-    """Copy an applied artwork into the desktop wallpaper library.
-
-    Without this, an image applied from Anime Wall lived only in
-    ~/Pictures/kiri-vault, so it could not be found again with the wallpaper
-    picker. A file with the same name and content is reused; a different file
-    with the same name gets a -2, -3 … suffix instead of being overwritten.
-    """
-    folder = wallpaper_folder()
+    if not command:
+        raise BooruError("random_wallpaper is not installed")
     try:
-        folder.mkdir(parents=True, exist_ok=True)
-        if source.resolve().parent == folder.resolve():
-            return source
-    except OSError:
-        return source
-
-    target = folder / source.name
-    counter = 2
-    while target.exists():
-        try:
-            if target.stat().st_size == source.stat().st_size and filecmp.cmp(
-                source, target, shallow=False
-            ):
-                return target
-        except OSError:
-            pass
-        target = folder / f"{source.stem}-{counter}{source.suffix}"
-        counter += 1
-
-    tmp = folder / f".{target.name}.{os.getpid()}.tmp"
-    try:
-        shutil.copy2(source, tmp)
-        os.replace(tmp, target)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        return source
-    return target
+        result = subprocess.run(command + ["--set", str(path), "--keep-source"], check=False,
+                                stderr=subprocess.PIPE, text=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BooruError("wallpaper apply did not complete") from exc
+    if result.returncode:
+        raise BooruError(result.stderr.strip() or "random_wallpaper failed")
 
 
 # --------------------------------------------------------------------------
@@ -1046,8 +1054,10 @@ def clean_rofi_pid() -> None:
         return
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:
         pidfile.unlink(missing_ok=True)
+    except PermissionError:
+        pass
 
 
 # rofi 2.x on X11 needs a settling period after each invocation. 250 ms is
@@ -1361,7 +1371,8 @@ def rofi_error(message: str) -> None:
 def preview_path(post: Post) -> Path:
     folder = cache_dir() / "previews"
     folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{post.provider}_{post.id}.img"
+    url_key = hashlib.sha256(post.preview_url.encode()).hexdigest()[:12]
+    return folder / f"{post.provider}_{post.id}_{url_key}.img"
 
 
 def placeholder_preview() -> Path | None:
@@ -1402,33 +1413,26 @@ def placeholder_preview() -> Path | None:
 
 def download_preview(post: Post) -> Path | None:
     target = preview_path(post)
-    if valid_image_file(target):
-        return target
-    if target.exists():
-        target.unlink(missing_ok=True)
-    request = urllib.request.Request(
-        post.preview_url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Referer": post.site + "/",
-            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=PREVIEW_TIMEOUT) as response:
-            data = response.read(6 * 1024 * 1024 + 1)
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
-    if not data or len(data) > 6 * 1024 * 1024 or not looks_like_image(data):
-        return None
-    tmp = target.with_suffix(f".{os.getpid()}.tmp")
-    try:
-        tmp.write_bytes(data)
-        tmp.replace(target)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        return None
-    return target
+    with (cache_dir() / f"preview-{post.id % 256}.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return target if valid_image_file(target) else None
+        cached = valid_image_file(target)
+        if cached and time.time() - target.stat().st_mtime <= PREVIEW_CACHE_TTL:
+            return target
+        tmp = target.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            status = transfer(post.preview_url, image_headers(post), tmp,
+                              PREVIEW_TIMEOUT, PREVIEW_MAX_BYTES)
+            if 200 <= status < 300 and valid_image_file(tmp):
+                tmp.replace(target)
+                return target
+        except (BooruError, OSError):
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
+        return target if cached else None
 
 
 def spawn_preview_prefetch(posts: list[Post]) -> None:
@@ -1471,12 +1475,16 @@ def fetch_previews(
         target = preview_path(post)
         if valid_image_file(target):
             previews[post.id] = target
-        else:
-            pending.append(post)
+            try:
+                if time.time() - target.stat().st_mtime <= PREVIEW_CACHE_TTL:
+                    continue
+            except OSError:
+                pass
+        pending.append(post)
     if not pending:
         return previews
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(workers, 8)))
     futures = {pool.submit(download_preview, post): post for post in pending}
     done, _ = concurrent.futures.wait(futures, timeout=budget)
     for future in done:
@@ -1488,8 +1496,9 @@ def fetch_previews(
         if path is not None:
             previews[post.id] = path
     pool.shutdown(wait=False, cancel_futures=True)
-    if spawn and len(previews) < len(posts):
-        spawn_preview_prefetch([post for post in posts if post.id not in previews])
+    if spawn:
+        completed = {futures[future].id for future in done}
+        spawn_preview_prefetch([post for post in pending if post.id not in completed])
     return previews
 
 
@@ -1508,15 +1517,13 @@ def build_entries(
     posts: list[Post],
     previews: dict[int, Path],
     download_root: Path,
-    pending_ids: set[int] | None = None,
 ) -> bytes:
-    pending_ids = pending_ids or set()
     placeholder = placeholder_preview()
     chunks: list[bytes] = []
     for post in posts:
         label = post.label()
         target = provider_folder(download_root, post.provider) / safe_name(post)
-        if post.id in pending_ids or target.exists():
+        if valid_image_file(target):
             label = "✓ " + label
         line = label.encode()
         icon = previews.get(post.id) or placeholder
@@ -1849,7 +1856,7 @@ def prompt_gelbooru(parser: configparser.ConfigParser) -> bool:
         parser.add_section("gelbooru")
     parser.set("gelbooru", "api_key", api_key.strip())
     parser.set("gelbooru", "user_id", user_id.strip())
-    save_config(parser)
+    save_config(parser, path)
     notify("anime-wall", "Gelbooru credentials saved")
     return True
 
@@ -2078,28 +2085,36 @@ def settings_menu(
     return "menu"
 
 
-def spawn_download(post: Post, settings: Settings, apply: bool) -> bool:
-    """Download in a detached worker so the rofi grid never blocks."""
-    payload = json.dumps(
-        {
-            "post": asdict(post),
-            "download_dir": str(settings.download_dir),
-            "apply": apply,
-        },
-        ensure_ascii=False,
-    )
+def start_download(post: Post, settings: Settings, apply: bool,
+                   *, report_status: bool = False) -> subprocess.Popen:
+    """Start a detached worker; new apply requests supersede older ones."""
+    token = uuid.uuid4().hex if apply else ""
+    marker = cache_dir() / "apply.latest"
+    tmp = marker.with_suffix(f".{os.getpid()}.tmp")
     try:
-        subprocess.Popen(
+        if token:
+            tmp.write_text(token, encoding="utf-8")
+            tmp.replace(marker)
+        return subprocess.Popen(
             [
                 sys.executable,
                 str(Path(__file__).resolve()),
                 "--download-one",
-                payload,
+                json.dumps({"post": asdict(post), "download_dir": str(settings.download_dir),
+                            "apply": token, "report_status": report_status},
+                           ensure_ascii=False),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def spawn_download(post: Post, settings: Settings, apply: bool) -> bool:
+    try:
+        start_download(post, settings, apply)
     except (OSError, ValueError) as exc:
         rofi_error(f"Cannot start the download: {exc}")
         return False
@@ -2123,14 +2138,19 @@ def download_one(payload: str) -> int:
         notify("anime-wall", f"Could not download: {exc}", 6000)
         return 1
 
-    if data.get("apply"):
-        applied = archive_wallpaper(target)
+    token = data.get("apply")
+    if token:
         try:
-            apply_wallpaper(applied)
-        except BooruError as exc:
+            with (cache_dir() / "apply.lock").open("a") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                # Another click can supersede an older, slower download.
+                if (cache_dir() / "apply.latest").read_text(encoding="utf-8") != token:
+                    return 3 if data.get("report_status") else 0
+                apply_wallpaper(target)
+        except (BooruError, OSError) as exc:
             notify("anime-wall", f"Saved, but wallpaper was not applied: {exc}", 6000)
             return 1
-        notify("Wallpaper applied", f"{post.provider} #{post.id}\n{applied}", 4000)
+        notify("Wallpaper applied", f"{post.provider} #{post.id}", 4000)
     else:
         tags = post.tags.split()[:4]
         body = f"{post.provider} #{post.id} · {target.name}\n{target.parent}"
@@ -2192,7 +2212,6 @@ def results_loop(
             settings.per_page, PROVIDERS[settings.provider]["max_limit"]
         )
         debug(f"page={settings.page} posts={len(posts)} has_next={has_next}")
-        saved_ids: set[int] = set()
         selected_row = 0
 
         while True:
@@ -2203,7 +2222,7 @@ def results_loop(
             )
             refresh_previews(posts, previews)
             entries = build_entries(
-                posts, previews, settings.download_dir, saved_ids
+                posts, previews, settings.download_dir
             )
             action, index = run_grid(
                 entries,
@@ -2258,92 +2277,14 @@ def results_loop(
                 apply = True
             else:
                 apply = settings.on_enter == "apply"
-            if spawn_download(post, settings, apply):
-                saved_ids.add(post.id)
+            spawn_download(post, settings, apply)
             time.sleep(0.25)  # prevent a double-click from hitting the new grid
-
-
-def settings_to_args(settings: Settings) -> list[str]:
-    return [
-        "--provider",
-        settings.provider,
-        "--tags",
-        settings.tags,
-        "--rating",
-        settings.rating,
-        "--min-score",
-        str(settings.min_score),
-        "--min-width",
-        str(settings.min_width),
-        "--min-height",
-        str(settings.min_height),
-        "--orientation",
-        settings.orientation,
-        "--sort",
-        settings.sort,
-        "--limit",
-        str(settings.per_page),
-        "--page",
-        str(settings.page),
-    ]
-
-
-def maybe_prefetch(
-    settings: Settings,
-    parser: configparser.ConfigParser,
-    config_file: Path | None = None,
-) -> None:
-    """Warm the API and thumbnail caches in a detached process.
-
-    The menu itself never waits for the network: by the time the user presses
-    Search, the results and most previews are usually already on disk.
-    """
-    key = api_cache_key(settings)
-    cached = read_api_cache(key)
-    if cached is not None and time.time() - cached[1] < 120:
-        return
-
-    marker = cache_dir() / "prefetch.json"
-    now = time.time()
-    try:
-        previous = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        previous = {}
-    if (
-        previous.get("key") == key
-        and isinstance(previous.get("ts"), (int, float))
-        and now - float(previous["ts"]) < 45
-    ):
-        return
-    try:
-        marker.write_text(json.dumps({"key": key, "ts": now}), encoding="utf-8")
-    except OSError:
-        pass
-
-    args = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--prefetch",
-    ]
-    if config_file is not None:
-        args += ["--config", str(config_file)]
-    args += settings_to_args(settings)
-    try:
-        subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except (OSError, ValueError):
-        pass
 
 
 def ui(
     settings: Settings,
     parser: configparser.ConfigParser,
     state: dict,
-    config_file: Path | None = None,
 ) -> int:
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         raise BooruError("no graphical session (DISPLAY is not set)")
@@ -2359,7 +2300,6 @@ def ui(
     if not settings.tags:
         settings.tags = state.get("last_tags", {}).get(settings.provider, "")
 
-    last_prefetch_key: str | None = None
     notice = ""
     while True:
         action, tags = search_prompt(
@@ -2390,11 +2330,6 @@ def ui(
         state.setdefault("last_tags", {})[settings.provider] = settings.tags
         state["last_provider"] = settings.provider
         save_state(state)
-
-        key = api_cache_key(settings)
-        if key != last_prefetch_key:
-            maybe_prefetch(settings, parser, config_file)
-            last_prefetch_key = key
 
         while True:
             where = results_loop(settings, parser, state)
@@ -2429,7 +2364,12 @@ def prefetch_previews(payload: str) -> int:
     except (ValueError, TypeError, KeyError):
         return 1
     if posts:
-        fetch_previews(posts, 16, budget=30, spawn=False)
+        with (cache_dir() / "preview-worker.lock").open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0
+            fetch_previews(posts, 8, budget=16, spawn=False)
     return 0
 
 
@@ -2457,6 +2397,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-dir", help="override the download folder")
     parser.add_argument("--print", action="store_true", dest="print_json", help="print results as JSON")
     parser.add_argument("--config", help="use an alternate config file")
+    parser.add_argument("--rofi", action="store_true", help="use the legacy rofi interface")
     parser.add_argument("--prefetch", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prefetch-previews", metavar="JSON", help=argparse.SUPPRESS)
     parser.add_argument("--download-one", metavar="JSON", help=argparse.SUPPRESS)
@@ -2465,6 +2406,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.download_one:
+        return download_one(args.download_one)
+    if args.prefetch_previews:
+        return prefetch_previews(args.prefetch_previews)
     path = Path(args.config).expanduser() if args.config else config_path()
     try:
         parser = load_config(path)
@@ -2497,16 +2442,20 @@ def main(argv: list[str] | None = None) -> int:
         settings.download_dir = Path(args.download_dir).expanduser()
     settings.clamp()
 
-    if args.download_one:
-        return download_one(args.download_one)
-    if args.prefetch_previews:
-        return prefetch_previews(args.prefetch_previews)
     if args.prefetch:
         return prefetch_mode(settings, parser)
 
     if not (args.print_json or args.download is not None):
         try:
-            return ui(settings, parser, load_state(), path)
+            if args.rofi:
+                return ui(settings, parser, load_state())
+            try:
+                from anime_wall_ui import run
+            except (ImportError, ValueError) as exc:
+                raise BooruError(
+                    "GTK gallery requires python-gobject and gtk4 (or use anime-wall --rofi)"
+                ) from exc
+            return run(sys.modules[__name__], settings, parser, load_state(), path)
         except BooruError as exc:
             print(f"anime-wall: {exc}", file=sys.stderr)
             return 1

@@ -20,7 +20,7 @@
 # key-repeat press does not walk the library.
 #
 # Concurrency: exactly one worker may own wallpaper.lock. Every other desktop
-# invocation only publishes its choice to wallpaper.pending and exits, so a
+# random invocation publishes its choice to wallpaper.pending, so a
 # burst of keypresses is coalesced to the newest wallpaper. Lock screen changes
 # are just an atomic symlink swap and never touch the desktop worker.
 #
@@ -29,7 +29,7 @@
 # Polybar and dunst are NOT rebuilt for every wallpaper you skip past. Once no
 # press arrives for WALLPAPER_SETTLE_MS, the worker starts one detached apply.py
 # for the wallpaper you stopped on and releases the lock. The rebuild aborts
-# by itself if ~/.fehbg moves to another image, so the next press is always
+# by itself if ~/.current_wallpaper changes, so the next press is always
 # instant even while GTK/Polybar are being recolored.
 #
 #   random_wallpaper                    pick a random desktop wallpaper
@@ -57,15 +57,18 @@ IMPORT_LOCK="$CACHE_DIR/wallpaper-import.lock"
 # How long the wallpaper must stay unchanged before the palette is rebuilt.
 # Only image switches are allowed during this window, so browsing stays fast.
 SETTLE_MS="${WALLPAPER_SETTLE_MS:-1500}"
+[[ "$SETTLE_MS" =~ ^[0-9]{1,5}$ ]] || SETTLE_MS=1500
+SETTLE_MS=$((10#$SETTLE_MS))
 mkdir -p "$WALL_CACHE_DIR" "$DESKTOP_DIR" "$LOCKSCREEN_DIR"
 
 MODE="desktop"
 ACTION=""
 EXPLICIT=""
+KEEP_SOURCE=0
 
 usage() {
     cat <<EOF
-usage: ${0##*/} [--lockscreen] [--set PATH | --cache-all]
+usage: ${0##*/} [--lockscreen] [--set PATH [--keep-source] | --cache-all]
 EOF
 }
 
@@ -90,6 +93,10 @@ while [ "$#" -gt 0 ]; do
             ACTION="set"
             EXPLICIT="$2"
             shift 2
+            ;;
+        --keep-source)
+            KEEP_SOURCE=1
+            shift
             ;;
         --cache-all)
             ACTION="cache"
@@ -124,7 +131,7 @@ cache_wallpaper() {
         tmp="$cache.$$.jpg"
         rm -f "$tmp"
         if command -v vipsthumbnail >/dev/null 2>&1 &&
-           vipsthumbnail "$src" -s "${width}x${height}" -m centre -o "$tmp" >/dev/null 2>&1; then
+           timeout -k 1 8 vipsthumbnail "$src" -s "${width}x${height}" -m centre -o "$tmp" >/dev/null 2>&1; then
             mv "$tmp" "$cache"
         else
             rm -f "$tmp"
@@ -165,12 +172,18 @@ build_list() {
 }
 
 screen_geometry() {
+    local saved="" now=${EPOCHSECONDS:-$(date +%s)} stamp=0 display="" tmp
     if [ -s "$SCREEN_FILE" ]; then
-        read -r SCREEN < "$SCREEN_FILE"
-    else
-        SCREEN=$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; found=1} END {if (!found) exit 1}' || true)
-        [ -n "$SCREEN" ] || SCREEN=2560x1600
-        printf '%s\n' "$SCREEN" > "$SCREEN_FILE"
+        read -r saved stamp display < "$SCREEN_FILE" || true
+    fi
+    SCREEN=$saved
+    if [[ ! "$stamp" =~ ^[1-9][0-9]{0,11}$ || "$display" != "${DISPLAY:-}" ]] ||
+       (( now - stamp >= 5 )); then
+        SCREEN=$(timeout -k 1 2 xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2}' || true)
+        [[ "$SCREEN" =~ ^[0-9]+x[0-9]+$ ]] || SCREEN=2560x1600
+        tmp="$SCREEN_FILE.$$"
+        printf '%s %s %s\n' "$SCREEN" "$now" "${DISPLAY:-}" > "$tmp"
+        mv -f -- "$tmp" "$SCREEN_FILE"
     fi
     SCREEN_W=${SCREEN%x*}
     SCREEN_H=${SCREEN#*x}
@@ -187,7 +200,7 @@ import_wallpaper() {
     # time. Serialize only the library-copy section so two callers cannot
     # choose the same collision suffix.
     exec 8>"$IMPORT_LOCK"
-    flock -x 8
+    flock -w 8 8 || return 1
     real=$(realpath -e -- "$src" 2>/dev/null || printf '%s' "$src")
 
     # Already in the library (possibly reached through a symlink): nothing to do.
@@ -223,11 +236,13 @@ import_wallpaper() {
 
     # Downloads and temporary files are one-shot: after import they belong to
     # the library. Everything else (e.g. the Anime Wall vault) is copied.
-    case "$real" in
-        "$HOME/Downloads"/*|/tmp/*|"${TMPDIR:-/tmp}"/*)
-            rm -f -- "$real"
-            ;;
-    esac
+    if [ "$KEEP_SOURCE" = 0 ]; then
+        case "$real" in
+            "$HOME/Downloads"/*|/tmp/*|"${TMPDIR:-/tmp}"/*)
+                rm -f -- "$real"
+                ;;
+        esac
+    fi
 
     exec 8>&-
     printf '%s\n' "$target"
@@ -241,11 +256,12 @@ update_symlink() {
 }
 
 write_fehbg() {
-    local tmp="$HOME/.fehbg.$$"
+    local tmp="$HOME/.fehbg.$$" quoted
     # Keep ~/.fehbg a self-contained executable script: bspwm runs it from
     # bspwmrc on every login. Earlier versions wrote it without the execute
     # bit, so the wallpaper was not restored after a reboot.
-    printf '#!/bin/sh\nfeh --no-fehbg --bg-fill "%s"\n' "$1" > "$tmp"
+    quoted=${1//\'/\'\\\'\'}
+    printf "#!/bin/sh\\nfeh --no-fehbg --bg-fill '%s'\\n" "$quoted" > "$tmp"
     chmod 755 "$tmp"
     mv "$tmp" "$HOME/.fehbg"
 }
@@ -253,9 +269,16 @@ write_fehbg() {
 apply_desktop() {
     local source="$1" cache
     cache=$(cache_wallpaper "$source" "$SCREEN_W" "$SCREEN_H")
-    feh --no-fehbg --bg-fill "$cache" 9>&-
-    write_fehbg "$cache"
-    update_symlink "$source" "$DESKTOP_LINK"
+    timeout -k 1 5 feh --no-fehbg --bg-fill "$cache" 9>&- || return 1
+    write_fehbg "$cache" || return 1
+    update_symlink "$source" "$DESKTOP_LINK" || return 1
+}
+
+queue_theme() {
+    # Publish while the image worker still owns the lock. apply.py follows the
+    # live wallpaper, so a delayed launch can't restore an older explicit path.
+    setsid "$HOME/.config/theme/apply.py" --quiet --debounce 0 9>&- \
+        >/dev/null 2>&1 &
 }
 
 apply_lockscreen() {
@@ -345,24 +368,31 @@ case "$ACTION" in
 esac
 
 exec 9>"$LOCK"
-if ! flock -n 9; then
-    # A worker is already cycling wallpapers. Leave it only the newest choice.
-    dbg "publish $wall (worker busy)"
+# An explicit apply reports success only after feh accepted that image.
+if [ "$ACTION" = set ]; then
+    flock -w 12 9 || { echo "wallpaper worker is busy" >&2; exit 1; }
+    take_pending || true
+    apply_desktop "$wall" || { echo "could not apply wallpaper: $wall" >&2; exit 1; }
+    queue_theme
+    flock -u 9
+    # Service random requests that arrived while the explicit apply was active.
+    [ -f "$PENDING" ] || exit 0
+else
+    # Publish *before* testing the lock. A worker that's just finishing
+    # either observes this request or releases the lock so we can take it.
     publish_wallpaper "$wall"
+fi
+if ! flock -n 9 || ! take_pending; then
     exit 0
 fi
-
-dbg "worker acquired lock, start=$wall"
-# We own the worker. A newer press may have arrived while taking the lock.
-current="$wall"
-if take_pending; then
-    current="$PENDING_WALL"
-    dbg "dropped own pick for newer pending $current"
-fi
+current="$PENDING_WALL"
 
 while :; do
-    apply_desktop "$current"
-    dbg "applied $current"
+    if apply_desktop "$current"; then
+        dbg "applied $current"
+    else
+        dbg "failed to apply $current"
+    fi
 
     # Browse mode: keep consuming presses and only switch the image. The
     # palette is not touched until the user stops for SETTLE_MS, so skipping
@@ -388,6 +418,7 @@ while :; do
     # The user stopped on this wallpaper. Release the worker lock before the
     # expensive rebuild: the detached apply.py may take seconds in GTK/Polybar,
     # and the next keypress must still switch the image immediately.
+    queue_theme
     flock -u 9
 
     # Close the lost-wakeup window: a press that arrived just before the
@@ -405,11 +436,5 @@ while :; do
         fi
     fi
 
-    # One palette rebuild for the wallpaper the user settled on. No debounce
-    # here: the settle window above already coalesced the burst. The child must
-    # not inherit fd 9, or it would keep the worker lock for its whole run.
-    setsid "$HOME/.config/theme/apply.py" --quiet --debounce 0 9>&- \
-        >/dev/null 2>&1 &
-    dbg "spawned apply.py for $current; exit"
     exit 0
 done
