@@ -29,6 +29,7 @@ usage() {
 
 [ $# -eq 1 ] || usage
 
+bspc() { timeout -k 1 2 bspc "$@"; }
 json=$(bspc query -T -n focused 2>/dev/null) || exit 0
 [ -n "$json" ] || exit 0
 

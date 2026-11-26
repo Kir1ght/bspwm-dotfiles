@@ -4,14 +4,16 @@
 # programs read-then-write the display state, and rapid hotkey presses used to
 # race and leave an arbitrary rate behind.
 
+xrandr() { LC_ALL=C timeout -k 1 3 xrandr "$@"; }
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/xrandr.lock"
 flock -w 5 9 || exit 1
 
-OUT=$(xrandr --query 2>/dev/null | awk '/ primary/{print $1; exit}')
-[ -n "$OUT" ] || OUT=$(xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}')
+outputs=$(xrandr --query 2>/dev/null) || exit 1
+OUT=$(awk '$2 == "connected" && $3 == "primary" {print $1; exit}' <<<"$outputs")
+[ -n "$OUT" ] || OUT=$(awk '$2 == "connected" {print $1; exit}' <<<"$outputs")
 [ -n "$OUT" ] || exit 1
 
-read -r MODE CURRENT <<<"$(xrandr --query 2>/dev/null | awk -v out="$OUT" '
+read -r MODE CURRENT <<<"$(printf '%s\n' "$outputs" | awk -v out="$OUT" '
     $1 == out { inside = 1; next }
     inside && /^[^ \t]/ { exit }
     inside && /\*/ {
@@ -28,7 +30,7 @@ read -r MODE CURRENT <<<"$(xrandr --query 2>/dev/null | awk -v out="$OUT" '
 ')"
 [ -n "$MODE" ] || exit 1
 
-RATES=$(xrandr --query 2>/dev/null | awk -v out="$OUT" '
+RATES=$(printf '%s\n' "$outputs" | awk -v out="$OUT" '
     $1 == out { inside = 1; next }
     inside && /^[^ \t]/ { exit }
     inside && /\*/ {
@@ -52,5 +54,5 @@ else
 fi
 
 if xrandr --output "$OUT" --mode "$MODE" --rate "$TARGET" >/dev/null 2>&1; then
-    notify-send -u low -i display "Display" "Switched to $TARGET Hz"
+    timeout -k 1 2 notify-send -u low -i display "Display" "Switched to $TARGET Hz" 9>&-
 fi

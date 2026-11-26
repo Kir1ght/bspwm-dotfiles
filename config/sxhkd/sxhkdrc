@@ -4,11 +4,11 @@
 
 # Close focused window (Q = Quit window)
 super + q
-    bspc node -c
+    ~/.local/bin/bspwmctl node -c
 
 # Reload sxhkd configuration
 super + shift + r
-    pkill -USR1 -x sxhkd; notify-send 'sxhkd' 'Reloaded config' -t 1500
+    pkill -USR1 -u "$(id -u)" -x sxhkd && timeout 2 notify-send 'sxhkd' 'Reloaded config' -t 1500
 
 # Power / Exit menu (Shutdown, reboot, logout)
 super + shift + q
@@ -20,7 +20,7 @@ ctrl + shift + l
 
 # Turn the display off after a short delay (wake with any key/mouse)
 super + s
-    sleep 2 && xset dpms force off
+    sleep 2 && timeout 2 xset dpms force off
 
 # Wake the panel if it stayed dark (DPMS left it off after logout or reboot)
 super + alt + s
@@ -28,7 +28,7 @@ super + alt + s
 
 # Quit / restart bspwm
 ctrl + shift + {q,r}
-    bspc {quit,wm -r}
+    ~/.local/bin/bspwmctl {quit,wm -r}
 
 # =============================================================================
 # 2. APPLICATION LAUNCHERS
@@ -205,19 +205,19 @@ super + a
 
 # Cycle window focus (including floating)
 alt + {_,shift + }Tab
-    bspc node -f {next.local,prev.local}
+    ~/.local/bin/bspwmctl node -f {next.local,prev.local}
 
 # Focus last node / desktop
 super + {grave,Tab}
-    bspc {node,desktop} -f last
+    ~/.local/bin/bspwmctl {node,desktop} -f last
 
 # Swap current node with the biggest window
 super + g
-    bspc node -s biggest.window
+    ~/.local/bin/bspwmctl node -s biggest.window
 
 # Set node flags (x = locked, y = sticky, z = private)
 super + ctrl + {x,y,z}
-    bspc node -g {locked,sticky,private}
+    ~/.local/bin/bspwmctl node -g {locked,sticky,private}
 
 # =============================================================================
 # 6. BSPWM: NAVIGATION, SWAP & RESIZE (VIM HJKL)
@@ -225,11 +225,11 @@ super + ctrl + {x,y,z}
 
 # Move focus (Super) or swap node (Super + Shift)
 super + {_,shift + }{h,j,k,l}
-    bspc node -{f,s} {west,south,north,east}
+    ~/.local/bin/bspwmctl node -{f,s} {west,south,north,east}
 
 # Resize window (fixed syntax and correct Vim directions)
 super + ctrl + {h,j,k,l}
-    bspc node -z {left -20 0,bottom 0 20,top 0 -20,right 20 0}
+    ~/.local/bin/bspwmctl node -z {left -20 0,bottom 0 20,top 0 -20,right 20 0}
 
 # Niri-style split: mark the window to move, focus the target, press a half.
 # The marked window is placed immediately; there is no preview/Enter step.
@@ -244,7 +244,7 @@ super + alt + c
 
 # Workspace routing (1-9): switch desktop / send node / send and follow
 super + {_,shift + ,ctrl + }{1-9}
-    bspc {desktop -f,node -d,node -d --follow} '^{1-9}'
+    ~/.local/bin/bspwmctl {desktop -f,node -d,node -d --follow} '^{1-9}'
 
 # Niri-style split placement with an extra modifier: drag a window onto a
 # half of another one, or click a window to mark it and click a half of
@@ -256,21 +256,20 @@ super + alt + button1
 
 # Navigate workspaces with mouse wheel
 super + {button4,button5}
-    bspc desktop -f {prev.local,next.local}
+    ~/.local/bin/bspwmctl desktop -f {prev.local,next.local}
 
 # Move window across workspaces with mouse wheel
 super + ctrl + {button4,button5}
-    bspc node -d {prev.local,next.local} --follow
+    ~/.local/bin/bspwmctl node -d {prev.local,next.local} --follow
 
 # Focus previous / next window on desktop with mouse wheel
 super + shift + {button4,button5}
-    bspc node -f {prev.local,next.local}
+    ~/.local/bin/bspwmctl node -f {prev.local,next.local}
 
 # Toggle: touchpad off while a mouse is connected <-> touchpad always on
 super + shift + u
     ~/.local/bin/touchpad-autoswitch toggle
 
-# Projector: enable the HDMI output (wired to the NVIDIA GPU) and move the
-# focused window there fullscreen — plug the cable, focus the slideshow, press.
+# Projector: mirror the laptop, without moving or fullscreening any window.
 super + shift + o
-    ~/.local/bin/hdmi-present on --window
+    ~/.local/bin/hdmi toggle

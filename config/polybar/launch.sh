@@ -1,50 +1,86 @@
 #!/usr/bin/env bash
 
-# Serialize launches: bspwmrc, toggle-polybar and theme reloads can overlap.
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/polybar-launch.lock"
-# Wait instead of dropping the launch: a theme reload must not be skipped just
-# because bspwmrc is starting the bar at the same moment.
-flock -w 10 9 || exit 0
+action=${1:---start}
+case "$action" in
+	--start|--reload|--ensure|--hide|--toggle) ;;
+	*) echo "usage: $0 [--start|--reload|--ensure|--hide|--toggle]" >&2; exit 2 ;;
+esac
+: "${DISPLAY:?no X display}"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/polybar"
+runtime="${XDG_RUNTIME_DIR:-$state}"
+key=${DISPLAY//[^a-zA-Z0-9.-]/_}
+mkdir -p -- "$runtime" "$state" || exit 1
+exec 9>"$runtime/polybar-$key.lock"
+flock -w 8 9 || exit 1
 
-# Terminate already running bar instances and WAIT until they are really gone.
-# killall only sends SIGTERM and returns at once; polybar occasionally stalls in
-# its teardown ("Waiting for spawned processes to end"), e.g. while a module
-# script still waits for a network call. A normal bar exits in ~0.6 s, so 1.5 s
-# is enough; then SIGKILL keeps every theme reload bounded instead of adding a
-# 5 s pause to each wallpaper change.
-pkill -x polybar 2>/dev/null
-for _ in $(seq 1 15); do
-	pgrep -x polybar >/dev/null || break
-	sleep 0.1
-done
-if pgrep -x polybar >/dev/null; then
-	# Unkillable teardown: SIGKILL, then reap the script children it orphans
-	# (long-lived `time`/`backlight` modules), otherwise they stack up.
-	pkill -9 -x polybar 2>/dev/null
-	pkill -9 -f "$HOME/bin/brightness-watch" 2>/dev/null
-	pkill -9 -f "while :; do date" 2>/dev/null
-	sleep 0.2
+bar_pids() {
+	local pid
+	for pid in $(pgrep -u "$UID" -x polybar); do
+		grep -zFxq "DISPLAY=$DISPLAY" "/proc/$pid/environ" 2>/dev/null &&
+			printf '%s\n' "$pid"
+	done
+	return 0
+}
+
+wm() { timeout -k 1 1 bspc "$@" 9>&-; }
+
+mapfile -t bars < <(bar_pids)
+if [[ $action == --ensure && ${#bars[@]} != 0 ]]; then
+	exit 0
+fi
+if [[ $action == --reload && ${#bars[@]} == 0 ]]; then
+	exit 0
+fi
+if [[ $action == --toggle && ${#bars[@]} != 0 ]]; then
+	action=--hide
 fi
 
-# A SIGKILLed brightness-watch cannot run its trap, and older versions leaked
-# one `udevadm monitor` per bar restart (there were 21 of them). Reap orphaned
-# backlight monitors by PID; never `pkill -f`, whose pattern can match the
-# caller's own command line.
-for pid in $(ps -eo pid=,ppid=,args= |
-		awk '$2 == 1 && /udevadm monitor/ && /backlight/ {print $1}'); do
-	kill "$pid" 2>/dev/null
-done
+stop_bars() {
+	((${#bars[@]})) || return 0
+	# Stop bars on this X display only. Never pattern-kill arbitrary
+	# shell commands or process groups: a module click may have opened an app.
+	kill -TERM "${bars[@]}" 2>/dev/null || true
+	for ((i=0; i<15; i++)); do
+		mapfile -t bars < <(bar_pids)
+		((${#bars[@]})) || break
+		sleep 0.1
+	done
+	if ((${#bars[@]})); then
+		kill -KILL "${bars[@]}" 2>/dev/null || true
+		sleep 0.2
+		[[ -z $(bar_pids) ]] || { echo "polybar: previous instance did not exit" >&2; return 1; }
+	fi
+}
 
-# Launch bar1 and bar2
-echo "---" | tee -a /tmp/polybar1.log /tmp/polybar2.log
+if [[ $action == --hide ]]; then
+	stop_bars || exit 1
+	monitors=$(wm query -M --names 2>/dev/null) || exit 0
+	while IFS= read -r monitor; do
+		[[ -n $monitor ]] && wm config -m "$monitor" top_padding 0 || true
+	done <<<"$monitors"
+	exit 0
+fi
 
-# Auto-detect the monitor for [bar/top], т.к. идентификатор (eDP-1 и т.п.) зависит от железа пользователя
-export MONITOR=$(xrandr --query | awk '/ primary/{print $1; exit}')
-[ -z "$MONITOR" ] && export MONITOR=$(xrandr --query | awk '/ connected/{print $1; exit}')
-
-# Auto-detect a second connected monitor for [bar/top_external] instead of hardcoding
-# "HDMI-1-1" - имя внешнего монитора зависит от порта/видеокарты пользователя
-export MONITOR_EXTERNAL=$(xrandr --query | awk -v skip="$MONITOR" '/ connected/{if ($1 != skip) {print $1; exit}}')
+outputs=$(timeout -k 1 3 xrandr --query 9>&-) || exit 1
+# Only active outputs need bars; outputs at the same origin are clones.
+read -r MONITOR MONITOR_EXTERNAL < <(awk '
+	$2 == "connected" {
+		for (i = 3; i <= NF; i++) {
+			if ($i !~ /^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$/) continue
+			n++; name[n] = $1
+			origin[n] = substr($i, match($i, /[+-]/))
+			if (!primary || $3 == "primary") primary = n
+			break
+		}
+	}
+	END {
+		printf "%s", name[primary]
+		for (i = 1; i <= n; i++)
+			if (origin[i] != origin[primary]) { printf " %s", name[i]; break }
+		print ""
+	}' <<<"$outputs")
+[[ -n $MONITOR ]] || { echo "polybar: no active X output" >&2; exit 1; }
+export MONITOR MONITOR_EXTERNAL
 
 # Auto-detect the battery device for [module/battery], т.к. имя отличается между
 # производителями (BAT0, BAT1 и т.д.) - тот же фикс, что и в bin/battery-alert
@@ -63,20 +99,14 @@ export WLAN_IFACE=$(ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^wl/{print $
 ADAPTER_PATH=$(find /sys/class/power_supply -maxdepth 1 \( -name 'AC*' -o -name 'ADP*' \) 2>/dev/null | head -n1)
 [ -n "$ADAPTER_PATH" ] && export ADAPTER=$(basename "$ADAPTER_PATH")
 
-# Run on the desired monitor.
-# bspwmrc starts this script, so polybar inherits bspwm's IPC sockets (fds
-# 3..7). polybar hands its fds to every module script, and a long-lived script
-# that never reads one of those sockets lets bspwm block in write() forever:
-# bspc stops answering and the desktop freezes (2026-11-25, twice). Start the
-# bar in a subshell with all inherited descriptors closed; polybar opens what
-# it needs itself.
+safe_exec="$HOME/.local/bin/desktop-no-fds"
+[[ -x $safe_exec ]] || { echo "polybar: missing $safe_exec" >&2; exit 1; }
+command -v polybar >/dev/null || exit 1
+stop_bars || exit 1
+log="$state/$key.log"
+[[ ! -f $log || $(stat -c %s "$log") -lt 1048576 ]] || mv -f -- "$log" "$log.1"
 start_bar() {
-	(
-		for fd in $(seq 3 63); do
-			eval "exec ${fd}>&-" 2>/dev/null || true
-		done
-		exec polybar "$1" -r
-	) >>/tmp/polybar1.log 2>&1 &
+	"$safe_exec" setsid polybar "$1" -r </dev/null >>"$log" 2>&1 9>&- &
 	disown
 }
 
@@ -97,8 +127,7 @@ fi
 # bar occupies y=8..44 with height 36 at offset-y 0.5%.)
 bar_top_inset() {
 	# $1 = monitor name; print the bar's bottom edge (y + height) in pixels
-	timeout 2 xwininfo -root -tree 2>/dev/null |
-		awk -v suffix="_$1\"" '
+	awk -v suffix="_$1\"" '
 			/"polybar-/ && index($0, suffix) {
 				for (i = 1; i <= NF; i++) {
 					if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
@@ -107,23 +136,22 @@ bar_top_inset() {
 						exit
 					}
 				}
-			}'
+			}' <<<"$tree"
 }
 
 # Every bspc call is bounded: when bspwm's IPC is wedged, bspc never returns,
 # and an unbounded call here blocks the launcher (and any theme reload that
 # waits on its lock) for as long as the bar stays dead.
-if command -v bspc >/dev/null 2>&1; then
-	for _ in $(seq 1 20); do
-		missing=
-		for monitor in $(timeout 2 bspc query -M --names 2>/dev/null); do
-			[ -n "$(bar_top_inset "$monitor")" ] || missing=1
-		done
-		[ -z "$missing" ] && break
-		sleep 0.05
-	done
-	for monitor in $(timeout 2 bspc query -M --names 2>/dev/null); do
-		inset=$(bar_top_inset "$monitor")
-		[ -n "$inset" ] && timeout 2 bspc config -m "$monitor" top_padding "$inset"
-	done
-fi
+for ((i=0; i<12; i++)); do
+	tree=$(timeout -k 1 1 xwininfo -root -tree 2>/dev/null 9>&-) || exit 0
+	if [[ -n $(bar_top_inset "$MONITOR") ]]; then
+		[[ -z $MONITOR_EXTERNAL || -n $(bar_top_inset "$MONITOR_EXTERNAL") ]] && break
+	fi
+	sleep 0.1
+done
+monitors=$(wm query -M --names 2>/dev/null) || exit 0
+while IFS= read -r monitor; do
+	[[ -n $monitor ]] || continue
+	inset=$(bar_top_inset "$monitor")
+	[[ -n $inset ]] && wm config -m "$monitor" top_padding "$inset" || true
+done <<<"$monitors"

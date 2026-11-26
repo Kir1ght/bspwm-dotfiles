@@ -11,8 +11,9 @@ set -u
 self_dir=$(dirname -- "$(readlink -f -- "$0")")
 "$self_dir/bspwm-toggle-state" pseudo || exit $?
 
-state=$(bspc query -T -n focused 2>/dev/null \
+state=$("$self_dir/bspwmctl" query -T -n focused 2>/dev/null \
     | grep -o '"state":"[a-z_]*"' | head -1 | cut -d'"' -f4)
+[ -n "$state" ] || exit 0
 case "$state" in
     pseudo_tiled) message="Pseudo-tiled" ;;
     *)            message="Tiled" ;;

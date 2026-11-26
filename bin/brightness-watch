@@ -1,59 +1,65 @@
-#!/usr/bin/env bash
-# Stream the backlight percentage to Polybar's [module/backlight].
-#
-# Event-driven: the kernel emits a udev "change" event on every write to the
-# backlight attribute (measured: the event arrives 2-13 ms after the write), so
-# this process blocks in read() instead of polling every 250 ms.
-#
-# Polybar's `custom/script` + `tail = true` keeps it alive and shows every line
-# immediately, and the label reacts to *any* brightness change (Polybar click,
-# hardware key, other scripts). Prints exactly one line per change: on failure
-# of the sysfs read it leaves with an empty line so the bar never keeps a
-# phantom value.
+#!/usr/bin/env python3
+"""Stream backlight changes; stop udev monitoring when the bar goes away."""
+import os
+import select
+import signal
+import subprocess
+import sys
+from pathlib import Path
 
-set -uo pipefail
 
-for dev in /sys/class/backlight/*; do
-    if [ -r "$dev/brightness" ]; then
-        DIR=$dev
-        break
-    fi
-done
-[ -n "${DIR:-}" ] || exit 0
+def run() -> int:
+    card = os.environ.get("BACKLIGHT_CARD")
+    base = Path("/sys/class/backlight")
+    devices = [base / card] if card else sorted(base.iterdir())
+    backlight = next((path for path in devices if (path / "brightness").is_file()), None)
+    if backlight is None:
+        return 0
 
-last=
+    # Poll the write end for ERR/HUP as well as the udev pipe: a killed bar
+    # must not leave an orphan waiting for a backlight change forever.
+    output = sys.stdout.fileno()
+    poll = select.poll()
+    poll.register(output, select.POLLERR | select.POLLHUP)
+    monitor = subprocess.Popen(
+        ["udevadm", "monitor", "--udev", "--subsystem-match=backlight"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    last = None
+    try:
+        events = monitor.stdout.fileno()
+        poll.register(events, select.POLLIN | select.POLLHUP)
+        while True:
+            try:
+                value = int((backlight / "brightness").read_text())
+                maximum = int((backlight / "max_brightness").read_text())
+                percent = (value * 100 + maximum // 2) // maximum
+            except (OSError, ValueError, ZeroDivisionError):
+                print(flush=True)
+                return 0
+            if percent != last:
+                print(f"{percent}%", flush=True)
+                last = percent
+            ready = dict(poll.poll())
+            if output in ready or not os.read(events, 4096):
+                return 0
+    finally:
+        monitor.terminate()
+        try:
+            monitor.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            monitor.kill()
+            monitor.wait()
 
-emit() {
-    local cur max
-    if ! cur=$(cat "$DIR/brightness" 2>/dev/null) ||
-        ! max=$(cat "$DIR/max_brightness" 2>/dev/null) ||
-        [ "${max:-0}" -le 0 ]; then
-        # Device vanished: clear the label instead of freezing the old number.
-        printf '\n'
-        exit 0
-    fi
 
-    local pct=$(((cur * 100 + max / 2) / max))
-    [ "$pct" = "$last" ] && return 0
-    last=$pct
-    printf '%s%%\n' "$pct"
-}
+def stop(_signal, _frame):
+    raise SystemExit(0)
 
-emit
 
-# udevadm stays a child of this script; kill it when Polybar stops the module,
-# otherwise it would linger and hold the pipe open. PIPE matters too: if the bar
-# goes away, the next write raises SIGPIPE and the default handler would skip
-# the EXIT trap, leaving udevadm orphaned.
-#
-# A process substitution does NOT set $! to udevadm (that was the old bug: one
-# orphaned `udevadm monitor` accumulated on every Polybar restart). A coproc
-# whose subshell execs udevadm yields the real PID in $UDEV_PID.
-coproc UDEV { exec udevadm monitor --udev --subsystem-match=backlight --property 2>/dev/null; }
-monitor=$UDEV_PID
-trap 'kill "$monitor" 2>/dev/null; exit 0' EXIT TERM INT PIPE HUP
-
-# Every event is a block of KEY=VALUE lines terminated by an empty line.
-while IFS= read -r line <&"${UDEV[0]}"; do
-    [ -z "$line" ] && emit
-done
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
+    try:
+        raise SystemExit(run())
+    except (OSError, KeyboardInterrupt):
+        raise SystemExit(0)

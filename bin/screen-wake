@@ -10,22 +10,27 @@
 # actually dark (actual_brightness near zero) and only clears DPMS from a
 # running X session.
 
-CARD=$(ls /sys/class/backlight 2>/dev/null | head -n1)
-[ -n "$CARD" ] || exit 0
-DIR=/sys/class/backlight/$CARD
-
-# Value systemd-backlight restored at boot; fall back to ~30%.
-SAVED=19660
-for f in /var/lib/systemd/backlight/*:backlight:"$CARD"; do
-    [ -f "$f" ] && SAVED=$(cat "$f" 2>/dev/null || echo 19660)
+for DIR in /sys/class/backlight/*; do
+    [ -r "$DIR/max_brightness" ] && break
 done
-[ "$SAVED" -ge 12000 ] 2>/dev/null || SAVED=19660
+CARD=${DIR##*/}
 
-ACTUAL=$(cat "$DIR/actual_brightness" 2>/dev/null || echo 0)
-if [ "$ACTUAL" -lt 3000 ] 2>/dev/null; then
-    printf '%s\n' "$SAVED" >"$DIR/brightness" 2>/dev/null || true
+if read -r MAX 2>/dev/null <"$DIR/max_brightness" &&
+   read -r ACTUAL 2>/dev/null <"$DIR/actual_brightness" &&
+   [ "$MAX" -gt 0 ] && [ "$ACTUAL" -le "$((MAX / 20))" ]; then
+    # systemd-backlight stores a raw value in the selected device's units.
+    # Fall back to 30% instead of writing a value only valid on one laptop.
+    SAVED=""
+    for f in /var/lib/systemd/backlight/*:backlight:"$CARD"; do
+        [ ! -r "$f" ] || read -r SAVED _ <"$f"
+    done
+    if ! [ "${SAVED:-0}" -gt "$((MAX / 20))" ] 2>/dev/null ||
+       [ "$SAVED" -gt "$MAX" ] 2>/dev/null; then
+        SAVED=$(((MAX * 30 + 99) / 100))
+    fi
+    printf '%s\n' "$SAVED" 2>/dev/null >"$DIR/brightness" || true
 fi
 
 if [ -n "${DISPLAY:-}" ] && command -v xset >/dev/null 2>&1; then
-    xset dpms force on >/dev/null 2>&1 || true
+    timeout -k 1 2 xset dpms force on >/dev/null 2>&1 || true
 fi

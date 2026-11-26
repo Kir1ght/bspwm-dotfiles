@@ -9,6 +9,8 @@ flock -n 9 || exit 0
 program_name="Cursor Tracker"
 wait_time=300
 countdown=0
+display_key=${DISPLAY:-none}
+caffeine_state="${XDG_RUNTIME_DIR:-$HOME/.cache}/caffeine-${display_key//[^a-zA-Z0-9.-]/_}.state"
 
 # MOUSE LOCATION VARS
 X=0
@@ -53,8 +55,9 @@ notify() {
 while :; do
     sleep 1
 
-    if [ -f "/tmp/caffeine.lock" ]; then
+    if [ -f "$caffeine_state" ]; then
         counter=0
+        protection=0
         continue
     fi
 

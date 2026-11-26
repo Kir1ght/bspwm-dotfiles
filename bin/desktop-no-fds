@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Exec a desktop helper without inheriting its parent's IPC sockets/pipes."""
+import os
+import sys
+
+if len(sys.argv) < 2:
+    raise SystemExit("usage: desktop-no-fds COMMAND [ARG ...]")
+
+fds = [int(name) for name in os.listdir("/proc/self/fd") if name.isdecimal()]
+os.closerange(3, max(fds, default=2) + 1)
+try:
+    os.execvp(sys.argv[1], sys.argv[1:])
+except OSError as exc:
+    print(f"desktop-no-fds: {exc}", file=sys.stderr)
+    raise SystemExit(127)

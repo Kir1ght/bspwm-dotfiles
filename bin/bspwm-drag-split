@@ -29,7 +29,7 @@
 
 set -u
 
-BSPC=${BSPC:-bspc}
+BSPC=${BSPC:-$(dirname -- "$0")/bspwmctl}
 POLL=${POLL:-0.04}
 DRAG_THRESHOLD=${DRAG_THRESHOLD:-9}   # pixels before a click becomes a drag
 

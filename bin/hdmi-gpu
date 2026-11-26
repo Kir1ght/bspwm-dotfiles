@@ -5,114 +5,46 @@
 # NVIDIA driver for an external monitor to work at all (Reverse PRIME). The
 # price: while X holds the dGPU it cannot runtime-suspend, which costs battery.
 #
-# Two mechanisms exist on Arch, and the script probes for both instead of
-# assuming one, because the NVIDIA 6xx packages (620.73 at the time of writing)
-# no longer ship nvidia_drm.ko into a plain `nvidia-utils` install and let X
-# autoload the driver for the dGPU's DRM node. When the driver never loads the
-# old /etc/X11/xorg.conf.d/10-igpu.conf file goes away on its own, and this
-# script used to fail with "unknown state" forever.
-#
-#   A) the legacy file: /etc/X11/xorg.conf.d/10-igpu.conf exists and names
-#      "nvidia" -> X loads only the NVIDIA card; renamed to *.disabled it is
-#      gone and X picks the AMD iGPU (and may or may not autoload NVIDIA).
-#   B) what X actually did: /sys/class/drm/card*-*/device/vendor tells us
-#      whether an NVIDIA DRM node is in use by the running server.
-#
 #   hdmi-gpu on       let X load the NVIDIA driver (HDMI works)
 #   hdmi-gpu off      X uses only the AMD iGPU (best battery)
 #   hdmi-gpu status   show the current state
 #
-# The change takes effect at the next X start: log out of bspwm (Ctrl+Shift+Q)
-# and run startx again. `hdmi-gpu on` warns when starting X will not actually
-# bring the NVIDIA driver up, instead of reporting a switch that cannot work.
+# The change takes effect at the next X login. A missing override is normal.
 
 CONF=/etc/X11/xorg.conf.d/10-igpu.conf
 DISABLED=$CONF.disabled
 
-# A card is in use by X when its DRM node has a master held; without root we
-# cannot read that, so fall back to "the file mode our session can open".
-x_runs_nvidia() {
-    # /sys/class/drm/cardN/device/vendor == 0x10de means an NVIDIA DRM node
-    # exists; if X has no conf excluding it, the server will pick it up.
-    for dev in /sys/class/drm/card*/device/vendor; do
-        [ -r "$dev" ] || continue
-        [ "$(cat "$dev" 2>/dev/null)" = "0x10de" ] || continue
-        return 0
-    done
-    return 1
-}
-
-file_says_off() {
-    [ -e "$CONF" ] || return 1
-    grep -qi 'nvidia' "$CONF" 2>/dev/null
-}
-
-state() {
-    if [ -e "$CONF" ]; then
-        if file_says_off; then
-            echo off
-        else
-            # A 10-igpu.conf that does not mention nvidia is the AMD-only
-            # guard, i.e. the NVIDIA driver is deliberately kept out of X.
-            echo off
-        fi
-    elif x_runs_nvidia; then
-        echo on
-    else
-        echo off
-    fi
-}
-
-nvidia_in_x() {
-    # Ask the running server, when there is one. Failures mean "no X".
-    command -v xrandr >/dev/null 2>&1 || return 1
-    timeout 5 xrandr --listproviders 2>/dev/null | grep -qi 'NVIDIA'
-}
-
 resume_hint() {
-    echo "Log out (Ctrl+Shift+Q) and run startx to apply."
+    echo "Applies at the next X login; the current session was not changed."
 }
 
 case "${1:-status}" in
     status)
-        current=$(state)
-        if nvidia_in_x; then
-            echo "on  - X loads the NVIDIA driver, the HDMI port works"
-            echo "      the dGPU may stay awake, so battery life is lower"
+        if [ -e "$CONF" ]; then
+            echo "Next X login: iGPU-only override present"
         else
-            case "$current" in
-                off)
-                    echo "off - X uses only the AMD iGPU, the HDMI port is dead"
-                    ;;
-                on)
-                    # Files no longer exclude NVIDIA, yet the server has no
-                    # NVIDIA provider: the driver is not loading at this
-                    # kernel/package combination.
-                    echo "on (files) - but the running X server has no NVIDIA provider"
-                    echo "      hdmi-present cannot work until the driver loads;"
-                    echo "      check: 'pacman -Q nvidia-utils nvidia-dkms nvidia-open-dkms'"
-                    ;;
-            esac
+            echo "Next X login: NVIDIA allowed (no iGPU-only override)"
+        fi
+        if ! providers=$(timeout -k 1 3 xrandr --listproviders 2>/dev/null); then
+            echo "Current X: unavailable"
+        elif printf '%s\n' "$providers" | grep -qi 'NVIDIA'; then
+            echo "Current X: NVIDIA provider present; use 'hdmi status' to check the cable"
+        else
+            echo "Current X: no NVIDIA provider"
         fi
         ;;
 
     on)
-        if [ -e "$DISABLED" ]; then
-            echo "already on"
+        if [ ! -e "$CONF" ]; then
+            echo "NVIDIA is already allowed. Use 'hdmi-gpu status' to check the running X."
             exit 0
         fi
-        if [ -e "$CONF" ]; then
-            sudo mv "$CONF" "$DISABLED" || exit 1
-            echo "10-igpu.conf disabled."
-        fi
-        if ! x_runs_nvidia && [ ! -e "$CONF" ]; then
-            # No NVIDIA DRM node and no conf to remove: nothing left to flip.
-            echo "note: this kernel does not expose an NVIDIA DRM node at all," >&2
-            echo "      so X cannot load the driver. Install the matching module" >&2
-            echo "      (nvidia-dkms or nvidia-open-dkms for this kernel)." >&2
+        if [ -e "$DISABLED" ] || [ -L "$DISABLED" ]; then
+            echo "Both $CONF and $DISABLED exist; refusing to overwrite either." >&2
             exit 1
         fi
-        echo "NVIDIA GPU enabled for X. $(resume_hint)"
+        sudo mv -- "$CONF" "$DISABLED" || exit 1
+        resume_hint
         ;;
 
     off)
@@ -120,15 +52,11 @@ case "${1:-status}" in
             echo "already off"
             exit 0
         fi
-        if [ ! -e "$DISABLED" ]; then
-            echo "note: no $DISABLED to restore; $CONF is absent." >&2
-            echo "      Add a conf that excludes the NVIDIA card, or accept" >&2
-            echo "      that the driver state follows the kernel module." >&2
+        if [ -f "$DISABLED" ]; then
+            sudo mv -- "$DISABLED" "$CONF" || exit 1
+            resume_hint
+            exit 0
         fi
-        # Copy rather than move: when the file never existed, we still want a
-        # guard that keeps the NVIDIA driver out of X. A conf without an
-        # NVIDIA OutputClass makes the modesetting driver skip those devices.
-        # The template ships in the repo so install.sh and this script agree.
         template="${HDMI_GPU_TEMPLATE:-$HOME/bspwm-dotfiles/system/xorg/10-igpu.conf}"
         if [ -r "$template" ]; then
             sudo install -Dm644 "$template" "$CONF" || exit 1
@@ -145,7 +73,7 @@ Section "ServerFlags"
 EndSection
 EOF
         fi
-        echo "NVIDIA GPU disabled for X. $(resume_hint)"
+        resume_hint
         ;;
 
     *)

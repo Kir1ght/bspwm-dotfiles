@@ -13,6 +13,7 @@
 set -euo pipefail
 
 POLL_FALLBACK=5
+xrandr() { LC_ALL=C timeout -k 1 3 xrandr "$@"; }
 
 log() {
     printf 'refresh-auto: %s\n' "$*" >&2
@@ -21,17 +22,17 @@ log() {
 
 output_name() {
     local name
-    name=$(xrandr --query 2>/dev/null | awk '/ primary/{print $1; exit}')
+    name=$(printf '%s\n' "$outputs" | awk '$2 == "connected" && $3 == "primary" {print $1; exit}')
     if [[ -n "$name" ]]; then
         printf '%s\n' "$name"
         return 0
     fi
-    xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}'
+    printf '%s\n' "$outputs" | awk '$2 == "connected" {print $1; exit}'
 }
 
 # Rates reported for the mode currently marked active on the output.
 rates_of_active_mode() {
-    xrandr --query 2>/dev/null | awk -v out="$1" '
+    printf '%s\n' "$outputs" | awk -v out="$1" '
         $1 == out { inside = 1; next }
         inside && /^[^ \t]/ { exit }
         inside && /\*/ {
@@ -48,7 +49,7 @@ rates_of_active_mode() {
 }
 
 current_mode() {
-    xrandr --query 2>/dev/null | awk -v out="$1" '
+    printf '%s\n' "$outputs" | awk -v out="$1" '
         $1 == out { inside = 1; next }
         inside && /^[^ \t]/ { exit }
         inside && /\*/ {
@@ -64,7 +65,7 @@ current_mode() {
 }
 
 current_rate() {
-    xrandr --query 2>/dev/null | awk -v out="$1" '
+    printf '%s\n' "$outputs" | awk -v out="$1" '
         $1 == out { inside = 1; next }
         inside && /\*/ {
             for (i = 2; i <= NF; i++) {
@@ -91,7 +92,12 @@ on_ac() {
 }
 
 apply_locked() {
-    local out rates want have mode
+    local out rates want have mode outputs
+    outputs=$(xrandr --query 2>/dev/null) || return 0
+    # Leave the active timing alone during a presentation.
+    if grep -qE '^HDMI-[^ ]* connected (primary )?[0-9]+x[0-9]+[+-]' <<<"$outputs"; then
+        return 0
+    fi
     out=$(output_name)
     [[ -n "$out" ]] || return 0
 
@@ -138,13 +144,11 @@ monitor() {
     # Reconnect if upower is restarted; each iteration is a blocking pipe,
     # not a poll of the hardware.
     while :; do
-        if ! upower -m 2>/dev/null | while IFS= read -r line; do
+        upower -m 2>/dev/null 9>&- | while IFS= read -r line; do
             case "$line" in
                 *line_power*) apply_once ;;
             esac
-        done; then
-            sleep "$POLL_FALLBACK"
-        fi
+        done || true
         sleep "$POLL_FALLBACK"
     done
 }

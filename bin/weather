@@ -4,15 +4,10 @@
 
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/weather-city"
 
-if [ -f "$CONF" ]; then
-    city=$(sed -n '1p' "$CONF")
-else
-    city=$(curl -fsS --max-time 5 'https://wttr.in/?format=%l' 2>/dev/null)
-fi
-[ -z "$city" ] && exit 0
-
-city=$(printf '%s' "$city" | tr ' ' '+')
-temp=$(curl -fsS --max-time 5 "https://wttr.in/${city}?format=%t" 2>/dev/null)
+city=""
+[ ! -r "$CONF" ] || IFS= read -r city < "$CONF" || true
+temp=$(curl -fsS --globoff --max-time 5 --max-filesize 1024 \
+    "https://wttr.in/$(printf '%s' "$city" | tr ' ' '+')?format=%t" 2>/dev/null)
 [ -z "$temp" ] && exit 0
 case "$temp" in
     *Unknown*|*HTML*|*curl*) exit 0 ;;

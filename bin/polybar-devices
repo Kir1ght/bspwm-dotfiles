@@ -10,16 +10,10 @@
 # wakes the radio, so a known value is refreshed only every 5 min; while the
 # mouse has not answered yet it retries every 30 s.
 
-# bspwmrc starts polybar, so the bar and every module script inherit bspwm's
-# IPC sockets (fds 3..7). A long-lived module that keeps such a socket open
-# without reading it lets bspwm block in write() forever: bspc stops answering
-# and the whole desktop freezes. Drop everything we did not open ourselves.
-for _fd in $(seq 3 63); do
-	eval "exec ${_fd}>&-" 2>/dev/null || true
-done
-unset _fd
-
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/polybar-devices.lock"
+export LC_ALL=C
+runtime=${XDG_RUNTIME_DIR:-$HOME/.cache}
+mkdir -p -- "$runtime" || exit 1
+exec 9>"$runtime/polybar-devices.lock"
 flock -n 9 || exit 0
 
 MOUSE_ICON=$(printf '\xee\xbe\xba')
@@ -54,16 +48,15 @@ bt_battery() {
 }
 
 refresh_mouse() {
-    local now json pct charging notified
-    now=$(date +%s)
-
-    if ! lsusb -d 373b:10c9 >/dev/null 2>&1; then
+    local now=$EPOCHSECONDS json pct charging notified status
+    json=$(timeout -k 1 4 vxe-battery --json 2>/dev/null 9>&-)
+    status=$?
+    if [[ $status == 3 ]]; then
         mouse_pct=""
-        mouse_next=$((now + MOUSE_PERIOD))
+        mouse_next=$((now + MOUSE_RETRY))
         return
     fi
 
-    json=$(timeout 4 vxe-battery --json 2>/dev/null)
     pct=$(sed -n 's/.*"percent": \([0-9][0-9]*\).*/\1/p' <<<"$json" | head -n1)
     if [ -z "$pct" ]; then
         # Asleep or busy: keep the last known value and retry sooner.
@@ -80,18 +73,22 @@ refresh_mouse() {
     if [ "$charging" = 1 ] || [ "$pct" -gt 25 ]; then
         printf '' >"$STATE"
     elif [ "$pct" -le 10 ] && [ "$notified" != 10 ]; then
-        notify-send -u critical -a Mouse -i input-mouse \
-            "Mouse battery: ${pct}%" "Charge the VXE R1 SE+ now."
-        printf '10' >"$STATE"
+        timeout -k 1 2 notify-send -u critical -a Mouse -i input-mouse \
+            "Mouse battery: ${pct}%" "Charge the VXE R1 SE+ now." &&
+            printf '10' >"$STATE"
     elif [ "$pct" -le 20 ] && [ "$notified" != 20 ] && [ "$notified" != 10 ]; then
-        notify-send -a Mouse -i input-mouse \
-            "Mouse battery: ${pct}%" "About 20% left, time to charge."
-        printf '20' >"$STATE"
+        timeout -k 1 2 notify-send -a Mouse -i input-mouse \
+            "Mouse battery: ${pct}%" "About 20% left, time to charge." &&
+            printf '20' >"$STATE"
     fi
 }
 
 while :; do
-    now=$(date +%s)
+    # If Polybar died without stopping the module, don't poll forever.
+    read -r proc_stat <"/proc/$$/stat" || exit 0
+    read -r _ parent _ <<<"${proc_stat##*) }"
+    [[ $parent != 1 ]] || exit 0
+    now=$EPOCHSECONDS
     [ "$now" -ge "$mouse_next" ] && refresh_mouse
 
     bt=$(bt_battery)
@@ -101,9 +98,9 @@ while :; do
     label="${parts[*]}"
 
     if [ "$label" != "$last" ]; then
-        printf '%s\n' "$label"
+        printf '%s\n' "$label" || exit 0
         last=$label
     fi
 
-    sleep "$BT_PERIOD"
+    sleep "$BT_PERIOD" 9>&-
 done

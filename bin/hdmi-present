@@ -22,6 +22,8 @@ set -u
 
 LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/hdmi-present.log"
 QUIET=0
+randr() { timeout -k 1 5 xrandr "$@"; }
+wm() { timeout -k 1 1 bspc "$@"; }
 
 log() {
     mkdir -p "${LOG_FILE%/*}" 2>/dev/null || true
@@ -31,11 +33,12 @@ log() {
 notify() {
     [ "$QUIET" = 1 ] && return 0
     command -v notify-send >/dev/null 2>&1 || return 0
-    notify-send -a "HDMI" -i video-display "HDMI" "$1" >/dev/null 2>&1 || true
+    timeout 2 notify-send -a "HDMI" -i video-display "HDMI" "$1" >/dev/null 2>&1 || true
 }
 
 fail() {
     log "error: $*"
+    [ "$QUIET" = 1 ] || printf '%s\n' "$*" >&2
     notify "$*"
     exit 1
 }
@@ -55,25 +58,26 @@ esac
 
 [ -n "${DISPLAY:-}" ] || fail "DISPLAY is not set"
 
-PROVIDERS=$(xrandr --listproviders 2>/dev/null) || fail "xrandr --listproviders failed"
+PROVIDERS=$(randr --listproviders 2>/dev/null) || fail "xrandr --listproviders failed"
 log "providers: $(printf '%s' "$PROVIDERS" | tr '\n' '|')"
 
-# Provider indices; the NVIDIA one is matched by name, the source (AMD) is the
-# first provider that is not NVIDIA.
-NV_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider [0-9]+:/ && /NVIDIA/ {gsub(":", "", $2); print $2; exit}')
-AMD_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider [0-9]+:/ && !/NVIDIA/ {gsub(":", "", $2); print $2; exit}')
+# Use RandR IDs, not the ordinal positions; avoid rebinding a live provider.
+NV_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider / && /NVIDIA/ && /Sink Output/ {print $4; exit}')
+AMD_PROVIDER=$(printf '%s\n' "$PROVIDERS" | awk '/^Provider / && !/NVIDIA/ && /Source Output/ {print $4; exit}')
 
-[ -n "$NV_PROVIDER" ] || fail "no NVIDIA provider in X: the Xorg config still disables the dGPU"
+[ -n "$NV_PROVIDER" ] || fail "no NVIDIA output provider in the running X session"
 [ -n "$AMD_PROVIDER" ] || fail "no source provider in X"
 
-log "setting provider output source: $NV_PROVIDER <- $AMD_PROVIDER"
-if ! xrandr --setprovideroutputsource "$NV_PROVIDER" "$AMD_PROVIDER" >>"$LOG_FILE" 2>&1; then
-    fail "xrandr --setprovideroutputsource failed (see $LOG_FILE)"
+if ! printf '%s\n' "$PROVIDERS" | grep -Eq "id: $NV_PROVIDER .*associated providers: [1-9]"; then
+    log "setting provider output source: $NV_PROVIDER <- $AMD_PROVIDER"
+    randr --setprovideroutputsource "$NV_PROVIDER" "$AMD_PROVIDER" >>"$LOG_FILE" 2>&1 ||
+        fail "xrandr --setprovideroutputsource failed (see $LOG_FILE)"
 fi
 
 [ "$ACTION" = "setup" ] && exit 0
 
-CONNECTED=$(xrandr -q | awk '/ connected/ {print $1}')
+OUTPUTS=$(randr -q) || fail "could not query outputs"
+CONNECTED=$(printf '%s\n' "$OUTPUTS" | awk '$2 == "connected" {print $1}')
 INTERNAL=$(printf '%s\n' "$CONNECTED" | grep -E '^(eDP|LVDS)' | head -n1)
 [ -n "$INTERNAL" ] || INTERNAL=$(printf '%s\n' "$CONNECTED" | head -n1)
 
@@ -86,19 +90,20 @@ EXTERNAL=$(printf '%s\n' "$CONNECTED" | grep -vE '^(eDP|LVDS)' | grep -E '^(HDMI
 [ -n "$INTERNAL" ] || fail "no internal panel found"
 
 log "enabling $EXTERNAL next to $INTERNAL"
-xrandr --output "$EXTERNAL" --auto --left-of "$INTERNAL" >>"$LOG_FILE" 2>&1 ||
+randr --output "$EXTERNAL" --auto --transform none --brightness 1 --left-of "$INTERNAL" >>"$LOG_FILE" 2>&1 ||
     fail "could not enable $EXTERNAL (see $LOG_FILE)"
 
 if [ "$MOVE_WINDOW" = 1 ]; then
     # bspwm learns about the new monitor through RandR, so give it a moment.
     i=0
     while [ "$i" -lt 30 ]; do
-        bspc query -M --names 2>/dev/null | grep -qx "$EXTERNAL" && break
+        monitors=$(wm query -M --names 2>/dev/null) || break
+        printf '%s\n' "$monitors" | grep -Fxq "$EXTERNAL" && break
         sleep 0.1
         i=$((i + 1))
     done
-    if bspc query -M --names 2>/dev/null | grep -qx "$EXTERNAL"; then
-        bspc node -m "$EXTERNAL" -t fullscreen >>"$LOG_FILE" 2>&1 ||
+    if printf '%s\n' "$monitors" | grep -Fxq "$EXTERNAL"; then
+        wm node -m "$EXTERNAL" -t fullscreen >>"$LOG_FILE" 2>&1 ||
             log "could not move the focused window to $EXTERNAL"
     else
         log "bspwm does not know the monitor $EXTERNAL yet"

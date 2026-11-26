@@ -75,9 +75,9 @@ def candidates():
 
 def query(dev, cmd, timeout=1.0):
     request = bytes([REPORT_ID, cmd] + [0] * 14 + [(0x4D - cmd) & 0xFF])
+    deadline = time.monotonic() + timeout
     try:
-        # Non-blocking: an unresponsive dongle must never make the caller wait
-        # inside write() or read(). Both are guarded by select() below.
+        # Bound the read; a kernel-side USB write may still take time.
         fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     except PermissionError:
         raise
@@ -89,17 +89,20 @@ def query(dev, cmd, timeout=1.0):
             return None
         if os.write(fd, request) != len(request):
             return None
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
-            return None
-        reply = os.read(fd, REPORT_LEN)
-    except BlockingIOError:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], max(0, deadline - time.monotonic()))
+            if not ready:
+                break
+            reply = os.read(fd, REPORT_LEN)
+            if len(reply) == REPORT_LEN and reply[0] == REPORT_ID and reply[1] == cmd:
+                return reply
+            if not reply:
+                break
+    except OSError:
         return None
     finally:
         os.close(fd)
-    if len(reply) < REPORT_LEN or reply[0] != REPORT_ID or reply[1] != cmd:
-        return None
-    return reply
+    return None
 
 
 def parse(reply, cmd):
@@ -110,8 +113,8 @@ def parse(reply, cmd):
         if 0 <= percent <= 100 and (millivolts == 0 or 2500 <= millivolts <= 5000):
             return percent, charging, millivolts
         return None
-    percent = min(reply[5] * 2, 100)
-    if 0 < percent <= 100:
+    percent = reply[5] * 2
+    if 0 <= percent <= 100:
         return percent, None, None
     return None
 
@@ -124,16 +127,20 @@ def read_battery(budget=2.5):
     """
     deadline = time.monotonic() + budget
     denied = []
-    for dev in candidates():
+    devices = list(candidates())
+    if not devices:
+        raise FileNotFoundError("mouse receiver is not connected")
+    for dev in devices:
         for cmd, attempts in ((0x04, 2), (0x17, 1)):
             # A sleeping mouse often ignores the first report; a second one
             # wakes it. Keep the whole exchange short so a silent mouse cannot
             # stall a polybar poll.
             for attempt in range(attempts):
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
                 try:
-                    reply = query(dev, cmd, timeout=min(1.0, max(0.1, deadline - time.monotonic())))
+                    reply = query(dev, cmd, timeout=min(0.75, remaining))
                 except PermissionError:
                     denied.append(dev)
                     break
@@ -156,6 +163,9 @@ def main():
         return 0
     try:
         result = read_battery()
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 3
     except PermissionError as exc:
         print(
             f"no access to {exc}: install the udev rule (`vxe-battery --udev`)\n"

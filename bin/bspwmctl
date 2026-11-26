@@ -1,0 +1,11 @@
+#!/bin/sh
+# Bound one-shot IPC; don't enqueue quit/restart against an unresponsive WM.
+case "$*" in
+    quit*|'wm -r')
+        timeout -k 1 1 bspc query -M >/dev/null 2>&1 || {
+            echo "bspwmctl: WM did not answer; not sending $*" >&2
+            exit 1
+        }
+        ;;
+esac
+exec timeout -k 1 2 bspc "$@"

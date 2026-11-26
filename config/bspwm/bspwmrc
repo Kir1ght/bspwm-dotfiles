@@ -7,20 +7,23 @@ export LIBVA_DRIVER_NAME=radeonsi
 export MOZ_DRM_DEVICE=/dev/dri/renderD129
 export SAL_DISABLE_OPENCL=1
 
-if ! pgrep -x sxhkd > /dev/null; then
-    sxhkd &
-fi
+safe_exec="$HOME/.local/bin/desktop-no-fds"
+bspc() { timeout -k 1 1 bspc "$@"; }
+running() { pgrep -u "$(id -u)" -x "$1" >/dev/null; }
+background() { "$safe_exec" "$@" >/dev/null 2>&1 & }
+
+running sxhkd || background sxhkd
 
 # A previous session may have left the panel DPMS-off; light it up again so a
 # fresh X session never starts on a black screen.
-command -v screen-wake >/dev/null 2>&1 && screen-wake >/dev/null 2>&1
+command -v screen-wake >/dev/null 2>&1 && timeout -k 1 4 screen-wake >/dev/null 2>&1
 
 # Multiple monitor support
 # The HDMI port is wired to the NVIDIA GPU: attach its outputs as a PRIME
 # display-offload sink first, otherwise xrandr (and dual_monitors.sh) cannot
 # see them at all. Silent no-op while the dGPU is disabled in Xorg.
 command -v hdmi-present >/dev/null 2>&1 && hdmi-present setup >/dev/null 2>&1
-sh $HOME/.config/bspwm/dual_monitors.sh
+sh "$HOME/.config/bspwm/dual_monitors.sh"
 
 # Palette generated from the current wallpaper (falls back to Dracula)
 [ -f "$HOME/.config/bspwm/colors.sh" ] && . "$HOME/.config/bspwm/colors.sh"
@@ -36,7 +39,7 @@ bspc config active_border_color "${ACTIVE_BORDER:-#ff79c6}"
 bspc config presel_feedback_color "${PRESEL_FEEDBACK:-#6272a4}"
 
 # fix pointer
-xsetroot -cursor_name left_ptr
+timeout 2 xsetroot -cursor_name left_ptr
 
 # gaps
 bspc config gapless_monocle false
@@ -56,7 +59,7 @@ bspc config pointer_action3 resize_corner
 bspc rule -a feh state=floating
 
 # start resources
-xrdb merge ~/.Xresources
+timeout 2 xrdb merge "$HOME/.Xresources"
 
 # Keyboard layout: configure here too, because ly starts bspwm directly and
 # never runs ~/.xinitrc. Re-applying unconditionally would switch the user back
@@ -71,18 +74,17 @@ xrdb merge ~/.Xresources
 # ~/.local/bin/xkb-layout-guard covers the hotplug case; the permanent cure is
 # `localectl set-x11-keymap us,ru pc105 "" grp:alt_shift_toggle`.
 if command -v setxkbmap >/dev/null 2>&1; then
-    kbd_query=$(setxkbmap -query 2>/dev/null)
+    kbd_query=$(LC_ALL=C timeout 2 setxkbmap -query 2>/dev/null)
     kbd_layout=$(printf '%s\n' "$kbd_query" | sed -n 's/^layout:[[:space:]]*//p')
     kbd_options=$(printf '%s\n' "$kbd_query" | sed -n 's/^options:[[:space:]]*//p')
     if [ "$kbd_layout" != "us,ru" ] ||
         ! printf '%s' "$kbd_options" | grep -q 'grp:alt_shift_toggle'; then
-        setxkbmap -layout us,ru -option grp:alt_shift_toggle || true
+        timeout 2 setxkbmap -layout us,ru -option grp:alt_shift_toggle || true
     fi
 fi
 
 # Restore the layout if an input hotplug resets it mid-session.
-pgrep -f 'sh .*/xkb-layout-guard$' >/dev/null 2>&1 ||
-    setsid -f "$HOME/.local/bin/xkb-layout-guard" >/dev/null 2>&1
+background "$HOME/.local/bin/xkb-layout-guard"
 
 # Language change notifications (listens to XKB group changes)
 # OFF: commented out — uncomment to re-enable (requires xkb-switch)
@@ -99,50 +101,51 @@ if [ ! -f "$DEFAULT_WALL" ]; then
         \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
         2>/dev/null | sort | head -n1)
 fi
-if [ -f "$HOME/.fehbg" ]; then
-    sh "$HOME/.fehbg" 2>/dev/null || feh --bg-fill "$DEFAULT_WALL"
-elif [ -L "$HOME/.current_wallpaper" ] && [ -f "$HOME/.current_wallpaper" ]; then
-    feh --no-fehbg --bg-fill "$HOME/.current_wallpaper"
-else
-    feh --bg-fill "$DEFAULT_WALL"
+if [ -f "$HOME/.fehbg" ] && timeout -k 1 5 sh "$HOME/.fehbg" 2>/dev/null; then
+    :
+elif [ -f "$HOME/.current_wallpaper" ]; then
+    timeout -k 1 5 feh --no-fehbg --bg-fill "$HOME/.current_wallpaper"
+elif [ -f "$DEFAULT_WALL" ]; then
+    timeout -k 1 5 feh --bg-fill "$DEFAULT_WALL"
 fi
-
-# Rebuild the palette from the current wallpaper: polybar, alacritty,
-# dunst, rofi, zathura, GTK and bspwm borders.
-"$HOME/.config/theme/apply.py" --quiet --no-reload --debounce 0
-
 
 # Panel refresh rate: 60 Hz on battery, highest on AC. Event-driven through
 # UPower, so nothing polls the hardware every few seconds.
-"$HOME/bin/refresh-auto" --monitor &
+background "$HOME/bin/refresh-auto" --monitor
 
 # Run polybar
-~/.config/polybar/launch.sh
+"$safe_exec" "$HOME/.config/polybar/launch.sh" --ensure
 
 # launch notification daemon (once; bspwmrc also runs on reload)
-if ! pgrep -x dunst >/dev/null; then
-    dunst -config "$HOME/.config/bspwm/dunstrc" &
-fi
+running dunst || background dunst -config "$HOME/.config/bspwm/dunstrc"
+background "$HOME/.config/theme/apply.py" --quiet --debounce 0
 
 # launch battery tracker and redshift
-pkill battery-alert; ~/bin/battery-alert &
-pgrep -x redshift > /dev/null || redshift &
+background "$HOME/bin/battery-alert"
+running redshift || background redshift
 
 # start compositor
-pgrep -x picom > /dev/null || picom --config $HOME/.config/bspwm/picom_configurations/1.conf &
+running picom || background picom --config "$HOME/.config/bspwm/picom_configurations/1.conf"
 
 # == autostart ==
-if command -v ksnip >/dev/null 2>&1; then
-    pkill -x ksnip 2>/dev/null || true
-    ksnip &
+if command -v ksnip >/dev/null 2>&1 && ! running ksnip; then
+    background ksnip
 fi
-if command -v throne >/dev/null 2>&1; then
-    pkill -x throne 2>/dev/null || true
-    throne &
+if command -v throne >/dev/null 2>&1 && ! running throne; then
+    background throne
 fi
 
 # launch clipboard manager daemon
-pkill greenclip; "$HOME/.local/bin/greenclip" daemon &
+if command -v greenclip >/dev/null 2>&1 && ! running greenclip; then
+    background greenclip daemon
+fi
+
+# Activate the existing session-bus service, not the app or tray indicator.
+if command -v kdeconnectd >/dev/null 2>&1 && command -v gdbus >/dev/null 2>&1; then
+    background timeout 4 gdbus call --session --dest org.freedesktop.DBus \
+        --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.StartServiceByName org.kde.kdeconnect 0
+fi
 
 # Touchpad autoswitch: disable the pad (both of its XInput interfaces) while a
 # mouse is connected. The daemon also owns the per-session Touchégg client:
@@ -150,11 +153,11 @@ pkill greenclip; "$HOME/.local/bin/greenclip" daemon &
 # libinput, so disabling the device in X is not enough) and starts it again
 # when the mouse goes away. The `touchegg --daemon` system service is enabled
 # by install.sh and is never touched.
-setsid -f "$HOME/.local/bin/touchpad-when-mouse.sh" >/dev/null 2>&1
+background "$HOME/.local/bin/touchpad-when-mouse.sh"
 
 # Run the cursor tracker detached: it loops forever and must not block bspwmrc.
-pkill -f "$HOME/bin/cursor_tracker.sh" 2>/dev/null || true
-setsid -f "$HOME/bin/cursor_tracker.sh" >/dev/null 2>&1
+background "$HOME/bin/caffeine.sh" --restore
+background "$HOME/bin/cursor_tracker.sh"
 
 # Swappy
 bspc rule -a Swappy state=floating centered=on

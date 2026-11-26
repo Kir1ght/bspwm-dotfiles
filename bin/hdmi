@@ -2,65 +2,170 @@
 # Управление внешним HDMI-экраном (выход на дискретной NVIDIA).
 set -u
 
-X() { timeout 6 xrandr "$@"; }
+export LC_ALL=C
+X() { timeout -k 1 6 xrandr "$@"; }
+fail() { printf '%s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
 hdmi — внешний экран (HDMI на NVIDIA)
 
-  hdmi on       включить, 1920x1080@60, справа от ноутбука
-  hdmi off      погасить картинку
-  hdmi toggle   переключить            (Super+P)
-  hdmi mirror   дублировать экран      (Super+Alt+P)
+  hdmi on       дублировать экран
+  hdmi off      отключить HDMI
+  hdmi toggle   включить зеркало или отключить HDMI (Super+Shift+O)
+  hdmi mirror   дублировать экран
+  hdmi mirror --common  дублировать без масштабирования (общий видеорежим)
+  hdmi extend   расширить рабочий стол вправо
   hdmi 4k       включить 3840x2160@30
   hdmi status   что подключено
   hdmi help     эта справка
 EOF
 }
 
-prov=$(timeout 6 xrandr --listproviders 2>/dev/null) || { echo "X не отвечает"; exit 1; }
-nid=$(echo "$prov" | grep -i nvidia | sed -n 's/.*id: \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
-aid=$(echo "$prov" | grep -i AMD    | sed -n 's/.*id: \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
+action=${1:-status}
+common=${2:-}
+case "$action" in
+  help|-h|--help) usage; exit 0 ;;
+  on|mirror|off|toggle|extend|4k|uhd|status) ;;
+  *) usage >&2; exit 2 ;;
+esac
+[[ -z $common || ($action == mirror && $common == --common && $# == 2) ]] || {
+    usage >&2
+    exit 2
+}
 
-# NVIDIA-выходы уже подцеплены к AMD? Если да — не трогаем:
-# повторный setprovideroutputsource на NVIDIA подвешивает X.
-attached() { echo "$prov" | grep -i nvidia | grep -q "associated providers: 1"; }
+if [[ $action != status ]]; then
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/xrandr.lock"
+    flock -w 4 9 || fail "Настройка экранов уже выполняется"
+    display=${DISPLAY:-}
+    state=${XDG_RUNTIME_DIR:-$HOME/.cache}/hdmi-${display//[^a-zA-Z0-9.-]/_}
+fi
+query=$(X --query) || fail "X не отвечает"
+if [[ $action == status ]]; then
+    awk '$2 == "connected" || $1 ~ /^HDMI-/' <<<"$query"
+    exit 0
+fi
 
-ext()   { X --query | awk '/^HDMI-[0-9]+-[0-9]+ connected/{print $1; exit}'; }
-is_on() { local e; e=$(ext); [ -n "$e" ] && X --query | grep -qE "^$e connected [0-9]"; }
+external() { awk '$1 ~ /^HDMI-/ && $2 == "connected" {print $1; exit}' <<<"$query"; }
+e=$(external)
+if [[ -z $e && $action != off ]] && ! grep -q '^HDMI-' <<<"$query"; then
+    "$(dirname -- "$0")/hdmi-present" setup || fail "NVIDIA HDMI недоступен в текущем X"
+    query=$(X --query) || fail "X не отвечает"
+    e=$(external)
+fi
+if [[ -z $e && $action != off ]]; then
+    fail "HDMI-экран не обнаружен: проверь кабель и выбранный вход"
+fi
+i=$(awk '$1 ~ /^(eDP|LVDS)/ && $2 == "connected" {print $1; exit}' <<<"$query")
+[[ -n $i ]] || fail "Встроенный экран не найден"
 
-case "${1:-status}" in
-  on)
-    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && { X --setprovideroutputsource "$nid" "$aid"; sleep 1; }
-    e=$(ext)
-    [ -z "$e" ] && { echo "внешний экран не виден в X — проверьте кабель HDMI"; exit 1; }
-    X --output "$e" --mode 1920x1080 --rate 60 --right-of eDP-1
-    X --output eDP-1 --pos 0x0
-    echo "вкл: $e 1920x1080@60 справа" ;;
+geometry() {
+    awk -v name="$1" '$1 == name && $2 == "connected" {
+        for (i = 3; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+[+-]/) {print $i; exit}
+    }' <<<"$query"
+}
+mode() {
+    awk -v name="$1" -v marker="$2" '
+        /^[^[:space:]]/ { selected = ($1 == name && $2 == "connected") }
+        selected && /^[[:space:]]+[0-9]/ && index($0, marker) {print $1; exit}
+    ' <<<"$query"
+}
+active_rate() {
+    awk -v name="$1" '
+        /^[^[:space:]]/ { selected = ($1 == name && $2 == "connected") }
+        selected && /^[[:space:]]+[0-9]/ {
+            for (i = 2; i <= NF; i++) if ($i ~ /\*/) { gsub(/[+*]/, "", $i); print $i; exit }
+        }
+    ' <<<"$query"
+}
+common_mode() {
+    awk -v internal="$i" -v external="$e" -v current="$1" '
+        /^[^[:space:]]/ { selected = ($2 == "connected" ? $1 : "") }
+        /^[[:space:]]+[0-9]+x[0-9]+[[:space:]]/ {
+            if (selected == internal) supported[$1] = 1
+            if (selected == external) hdmi[++n] = $1
+        }
+        END {
+            for (j = 1; j <= n; j++) if (hdmi[j] in supported) {
+                if (hdmi[j] == current) { print current; exit }
+                if (hdmi[j] == "1920x1080" || !choice) choice = hdmi[j]
+            }
+            if (choice) print choice
+        }' <<<"$query"
+}
+refresh_bar() {
+    # Recompute whether this is a clone or a separate monitor. Don't show a
+    # panel the user deliberately hid, and don't hold the RandR lock.
+    local launch="$HOME/.config/polybar/launch.sh"
+    [[ ! -x $launch ]] || "$launch" --reload </dev/null >/dev/null 2>&1 9>&- &
+}
+
+if [[ $action == toggle ]]; then
+    if [[ -n $(geometry "$e") ]]; then
+        action=off
+    else
+        action=mirror
+    fi
+fi
+
+case "$action" in
+  on|mirror)
+    # Keep the internal desktop size. Place a scaled view of the entire
+    # desktop at the same origin instead of clipping it to HDMI's resolution.
+    internal=$(mode "$i" '*')
+    [[ -n $internal ]] || internal=$(mode "$i" '+')
+    [[ $internal =~ ^[0-9]+x[0-9]+$ ]] || fail "Не удалось определить разрешение ноутбука"
+    internal_rate=$(active_rate "$i")
+    if [[ $common == --common ]]; then
+        shared=$(common_mode "$internal")
+        [[ -n $shared ]] || fail "У экранов нет общего видеорежима"
+        X --output "$i" --mode "$shared" --transform none --primary --pos 0x0 \
+          --output "$e" --mode "$shared" --brightness 1 --transform none --pos 0x0 \
+          || fail "X/NVIDIA не принял общий видеорежим"
+        if [[ $shared != "$internal" && ! -e $state ]]; then
+            mkdir -p -- "${state%/*}" && printf '%s %s\n' "$internal" "$internal_rate" >"$state"
+        fi
+    else
+      preferred=$(mode "$e" '+')
+      if awk -v name="$e" '
+        /^[^[:space:]]/ { selected = ($1 == name && $2 == "connected") }
+        selected && /^[[:space:]]+1920x1080[[:space:]]/ {
+            for (i = 2; i <= NF; i++) if ($i + 0 >= 59 && $i + 0 <= 60) found = 1
+        }
+        END { exit !found }' <<<"$query"; then
+        output=(--mode 1920x1080 --rate 60)
+      elif [[ -n $preferred ]]; then
+        output=(--mode "$preferred")
+      else
+        output=(--auto)
+      fi
+      rate=()
+      [[ -z $internal_rate ]] || rate=(--rate "$internal_rate")
+      X --output "$i" --mode "$internal" "${rate[@]}" --transform none --primary --pos 0x0 \
+      --output "$e" "${output[@]}" --brightness 1 --scale-from "$internal" --pos 0x0 \
+      || fail "X/NVIDIA не принял режим дублирования"
+    fi
+    refresh_bar
+    echo "Дублирование: $i → $e" ;;
   off)
-    e=$(ext)
-    [ -z "$e" ] && { echo "внешний экран не найден"; exit 0; }
-    X --output "$e" --mode 1920x1080 --rate 60 --right-of eDP-1
-    X --output "$e" --brightness 0
-    echo "погашен: $e" ;;
-  toggle)
-    if is_on; then exec "$0" off; else exec "$0" on; fi ;;
-  mirror)
-    e=$(ext)
-    [ -z "$e" ] && { echo "внешний экран не найден"; exit 1; }
-    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && X --setprovideroutputsource "$nid" "$aid"
-    X --output "$e" --mode 1920x1080 --rate 60 --same-as eDP-1
-    echo "зеркало: $e" ;;
-  4k|uhd)
-    e=$(ext)
-    [ -z "$e" ] && { echo "внешний экран не найден"; exit 1; }
-    ! attached && [ -n "${nid:-}" ] && [ -n "${aid:-}" ] && X --setprovideroutputsource "$nid" "$aid"
-    X --output "$e" --mode 3840x2160 --rate 30 --right-of eDP-1
-    echo "вкл: $e 3840x2160@30" ;;
-  status)
-    X --query | grep -E " connected" ;;
-  help|-h|--help)
-    usage ;;
-  *)
-    echo "неизвестная команда: $1"; echo; usage; exit 2 ;;
+    restore=()
+    if [[ -r $state ]] && read -r old_mode old_rate <"$state" &&
+       [[ $old_mode =~ ^[0-9]+x[0-9]+$ ]]; then
+        restore=(--output "$i" --mode "$old_mode")
+        [[ ! $old_rate =~ ^[0-9]+([.][0-9]+)?$ ]] || restore+=(--rate "$old_rate")
+    fi
+    disable=()
+    [[ -z $e ]] || disable=(--output "$e" --off --transform none)
+    if ((${#disable[@]} + ${#restore[@]})); then
+        X "${disable[@]}" "${restore[@]}" || fail "Не удалось отключить HDMI"
+    fi
+    rm -f -- "$state"
+    refresh_bar ;;
+  extend|4k|uhd)
+    output=(--auto)
+    [[ $action == extend ]] || output=(--mode 3840x2160 --rate 30)
+    X --output "$e" "${output[@]}" --brightness 1 --transform none --right-of "$i" \
+      || fail "Не удалось включить $e"
+    refresh_bar
+    echo "Расширение рабочего стола: $e" ;;
 esac

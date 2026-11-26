@@ -5,7 +5,8 @@ city=""
 [ -f "$CONF" ] && city=$(sed -n '1p' "$CONF")
 city=$(printf '%s' "$city" | tr ' ' '+')
 if [ -n "$city" ]; then
-    exec alacritty --hold -e sh -c "curl -s 'https://wttr.in/${city}?0'"
+    exec alacritty --hold -e curl -fSs --max-time 6 --globoff \
+        --url "https://wttr.in/${city}?0"
 else
-    exec alacritty --hold -e sh -c "curl -s 'https://wttr.in/?0'"
+    exec alacritty --hold -e curl -fSs --max-time 6 --url 'https://wttr.in/?0'
 fi
